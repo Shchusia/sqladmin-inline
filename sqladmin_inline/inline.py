@@ -1,6 +1,6 @@
 # inline.py
 """
-sqladmin_inlines.inline
+sqladmin_inline.inline
 ~~~~~~~~~~~~~~~~~~~~~~~
 
 Django-style inline editing for sqladmin.
@@ -241,6 +241,10 @@ class InlineModelAdmin(metaclass=InlineModelAdminMeta):
     column_searchable_list: ClassVar[Sequence[Any]] = []
     page_size: ClassVar[int] = 5
     can_delete: ClassVar[bool] = True
+
+    # UI display
+    icon: ClassVar[str | None] = None  # e.g. "fa fa-tag", "ti ti-tag"
+    layout: ClassVar[str] = "center"  # "center" or "sidebar"
 
     form_columns: ClassVar[Sequence[Any]] = []
     form_excluded_columns: ClassVar[Sequence[Any]] = []

@@ -1,6 +1,6 @@
 # views.py
 """
-sqladmin_inlines.views
+sqladmin_inline.views
 ~~~~~~~~~~~~~~~~~~~~~~
 
 ModelViewWithInlines class and HTTP route handlers for inline CRUD operations.
@@ -36,14 +36,14 @@ class ModelViewWithInlines(ModelView):
 
     Attributes:
         inlines: List of InlineModelAdmin subclasses to display.
-        create_template: Template for create view (default: sqladmin_inlines/create.html).
-        edit_template: Template for edit view (default: sqladmin_inlines/edit.html).
+        create_template: Template for create view (default: sqladmin_inline/create.html).
+        edit_template: Template for edit view (default: sqladmin_inline/edit.html).
     """
 
     inlines: ClassVar[Sequence[type[InlineModelAdmin]]] = []
 
-    create_template: ClassVar[str] = "sqladmin_inlines/create.html"
-    edit_template: ClassVar[str] = "sqladmin_inlines/edit.html"
+    create_template: ClassVar[str] = "sqladmin_inline/create.html"
+    edit_template: ClassVar[str] = "sqladmin_inline/edit.html"
 
     def _inline_relationship_names(self) -> list[str]:
         """Get to-many relationship names managed by inlines.
@@ -114,6 +114,8 @@ class ModelViewWithInlines(ModelView):
                     "pagination": pagination,
                     "search": search,
                     "search_enabled": bool(inline_cls._search_columns()),
+                    "icon": getattr(inline_cls, "icon", None),
+                    "layout": getattr(inline_cls, "layout", "center"),
                     "can_delete": inline_cls.can_delete,
                     "form_class": FormClass,
                     "parent_pk": _encode_parent_pk(parent_obj) if parent_obj else "",
@@ -143,7 +145,7 @@ def setup_inline_routes(admin: Any) -> None:
     from jinja2 import ChoiceLoader, FileSystemLoader
     from starlette.routing import Route
 
-    our_tmpl = str(pathlib.Path(__file__).parent.parent / "templates")
+    our_tmpl = str(pathlib.Path(__file__).parent / "templates")
     loader = admin.templates.env.loader
     loaders = loader.loaders if hasattr(loader, "loaders") else [loader]
     admin.templates.env.loader = ChoiceLoader(
@@ -203,7 +205,7 @@ def setup_inline_routes(admin: Any) -> None:
             "parent_pk": parent_pk_str,
         }
         return await admin.templates.TemplateResponse(  # type: ignore[no-any-return]
-            request, "sqladmin_inlines/_inline_table.html", ctx
+            request, "sqladmin_inline/_inline_table.html", ctx
         )
 
     async def inline_form(request: Request) -> Response:
@@ -269,7 +271,7 @@ def setup_inline_routes(admin: Any) -> None:
             "is_edit": bool(child_pk),
         }
         return await admin.templates.TemplateResponse(  # type: ignore[no-any-return]
-            request, "sqladmin_inlines/_inline_form.html", ctx
+            request, "sqladmin_inline/_inline_form.html", ctx
         )
 
     async def inline_save(request: Request) -> Response:
@@ -307,7 +309,7 @@ def setup_inline_routes(admin: Any) -> None:
             }
             return await admin.templates.TemplateResponse(  # type: ignore[no-any-return]
                 request,
-                "sqladmin_inlines/_inline_form.html",
+                "sqladmin_inline/_inline_form.html",
                 ctx,
                 status_code=422,
             )
@@ -376,6 +378,8 @@ def setup_inline_routes(admin: Any) -> None:
                     "pagination": pagination,
                     "search": search,
                     "search_enabled": bool(inline_cls._search_columns()),
+                    "icon": getattr(inline_cls, "icon", None),
+                    "layout": getattr(inline_cls, "layout", "center"),
                     "can_delete": inline_cls.can_delete,
                     "form_class": FormClass,
                     "parent_pk": parent_pk_str,

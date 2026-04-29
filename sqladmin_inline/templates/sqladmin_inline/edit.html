@@ -45,7 +45,7 @@
                 pagination=ctx.pagination, search=ctx.search,
                 search_enabled=ctx.search_enabled, can_delete=ctx.can_delete,
                 form_class=ctx.form_class, parent_pk=ctx.parent_pk %}
-          {% include "sqladmin_inlines/_inline_table.html" %}
+          {% include "sqladmin_inline/_inline_table.html" %}
         {% endwith %}
       {% endfor %}
 
@@ -85,7 +85,7 @@
                 pagination=ctx.pagination, search=ctx.search,
                 search_enabled=ctx.search_enabled, can_delete=ctx.can_delete,
                 form_class=ctx.form_class, parent_pk=ctx.parent_pk %}
-          {% include "sqladmin_inlines/_inline_table.html" %}
+          {% include "sqladmin_inline/_inline_table.html" %}
         {% endwith %}
       {% endfor %}
     </div>
@@ -116,7 +116,7 @@
               pagination=ctx.pagination, search=ctx.search,
               search_enabled=ctx.search_enabled, can_delete=ctx.can_delete,
               form_class=ctx.form_class, parent_pk=ctx.parent_pk %}
-        {% include "sqladmin_inlines/_inline_table.html" %}
+        {% include "sqladmin_inline/_inline_table.html" %}
       {% endwith %}
     {% endfor %}
 
@@ -150,5 +150,5 @@
 {% endblock %}
 
 {% block tail %}
-{% include "sqladmin_inlines/_inline_scripts.html" %}
+{% include "sqladmin_inline/_inline_scripts.html" %}
 {% endblock %}

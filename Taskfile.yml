@@ -1,0 +1,52 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+
+version: '3'
+
+
+tasks:
+  default:
+    cmds:
+      - task help
+  help:
+    desc: Show available tasks and their description
+    silent: true
+    cmds:
+      - 'echo ""'
+      - 'echo "Usage: task [task-name] [options]"'
+      - 'echo ""'
+      - 'echo "Available tasks:"'
+      - task --list
+
+  test:
+    desc: Run tests
+    cmds:
+      - coverage run -m pytest tests -s --cov=sqladmin_inline  --cov-branch --cov-report=term-missing -o log_cli=true
+    silent: true
+
+  publishtest:
+    desc: Run tests and publish results to https://coveralls.io/
+    cmds:
+      - uv run pytest tests --cov=tiny_ca --cov-branch --cov-report=term-missing --cov-report=xml -o log_cli=true
+      - coverage xml
+      - coveralls
+
+
+  lint:
+    desc: Check code by linters
+    cmds:
+      - pre-commit run --all-files
+
+  sync:
+    desc: ""
+    cmds:
+      - uv sync -U --group demo --group tests --group lint --group demo --active --inexact
+
+  demo:
+    desc: "Run Demo"
+    cmds:
+      - uv run python demo.py
+  build:
+    desc: Build library
+    cmds:
+      - rm -rf dist
+      - uv build

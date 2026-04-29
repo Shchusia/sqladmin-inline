@@ -3,7 +3,7 @@ sqladmin-inlines — Django-style inline editing for sqladmin.
 
 Usage::
 
-    from sqladmin_inlines import InlineModelAdmin, ModelViewWithInlines
+    from sqladmin_inline import InlineModelAdmin, ModelViewWithInlines
 
     class TagInline(InlineModelAdmin, model=Tag):
         column_list = [Tag.name]

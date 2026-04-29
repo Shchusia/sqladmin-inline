@@ -234,7 +234,7 @@ def setup_inline_routes(admin: Any) -> None:
                     try:
                         form_data[column.key] = getattr(obj, column.key)
                     except Exception:  # noqa # nosec
-                        pass  # noqa # nosec
+                        logger.debug("")
 
                 for rel in mapper.relationships:
                     if rel.direction.name == "MANYTOONE":

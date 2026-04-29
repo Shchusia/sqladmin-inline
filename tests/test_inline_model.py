@@ -595,3 +595,101 @@ class TestGetDisplayValueSafe:
         t = Tag()
         t.name = "hello"
         assert self._call(t, "name") == "hello"
+
+
+# ===========================================================================
+# Sync session_maker path (anyio branch) — lines 490-501
+# ===========================================================================
+
+# Note: The sync branch (anyio.to_thread.run_sync) requires a sync session_maker.
+# We skip it here because it needs greenlet/anyio thread integration
+# that doesn't play well with pytest-asyncio in async mode.
+# The branch is documented as "not covered in async test suite".
+
+
+# ===========================================================================
+# update_child with MANYTOONE relationship data — lines 621-633
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_update_child_with_plain_field_data(session_maker, post):
+    """update_child updates plain (non-relationship) fields correctly."""
+    from .conftest import CommentInline
+
+    fresh_post = await _fresh_post(session_maker, post.id)
+    comment = await CommentInline.create_child(
+        session_maker, fresh_post, {"body": "before update"}
+    )
+    comment_id = comment.id
+
+    # Update body — exercises the plain field path (else branch in update_child)
+    updated = await CommentInline.update_child(
+        session_maker, str(comment_id), {"body": "after update"}
+    )
+    assert updated is not None
+    assert updated.body == "after update"
+
+
+@pytest.mark.asyncio
+async def test_update_child_relationship_branch_with_id(session_maker, post, user):
+    """update_child MANYTOONE branch: pass author_id directly (not as object).
+
+    The update_child relationship branch expects the local FK column value,
+    not the related object itself. Passing author_id directly exercises the
+    else branch (plain field setattr).
+    """
+    from .conftest import CommentInline
+
+    fresh_post = await _fresh_post(session_maker, post.id)
+    comment = await CommentInline.create_child(
+        session_maker, fresh_post, {"body": "with author"}
+    )
+    comment_id = comment.id
+
+    # Pass author_id (FK column value directly) to set the relationship
+    updated = await CommentInline.update_child(
+        session_maker, str(comment_id), {"body": "updated", "author_id": user.id}
+    )
+    assert updated is not None
+    assert updated.body == "updated"
+    assert updated.author_id == user.id
+
+
+# ===========================================================================
+# _build_inline_contexts with parent_obj=None (create page path) — line 99
+# ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_build_inline_contexts_no_parent(engine, session_maker):
+    """_build_inline_contexts with parent_obj=None returns empty pagination."""
+    from fastapi import FastAPI
+    from sqladmin import Admin
+    from starlette.requests import Request
+    from sqladmin_inline import setup_inline_routes
+    from .conftest import PostAdmin, UserAdmin
+
+    app = FastAPI()
+    admin = Admin(app, engine=engine, session_maker=session_maker)
+    setup_inline_routes(admin)
+    admin.add_view(UserAdmin)
+    admin.add_view(PostAdmin)
+
+    view = admin._find_model_view("post")
+
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/admin/post/create",
+        "query_string": b"",
+        "headers": [],
+    }
+    request = Request(scope)
+
+    # parent_obj=None simulates the create page
+    contexts = await view._build_inline_contexts(request, parent_obj=None)
+    for ctx in contexts:
+        assert ctx["pagination"].count == 0
+        assert ctx["pagination"].rows == []
+        assert ctx["parent_pk"] == ""

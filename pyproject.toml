@@ -124,3 +124,19 @@ exclude = ["/tests", "/venv"]
 nosec = ["B608"]
 skips = ["*/*_test.py", "*/test_*.py", "*/grafana.py","B608"]
 recursive = true
+
+[tool.coverage.run]
+source = ["sqladmin_inline"]
+branch = true
+# pytest-cov handles collection — don't use `coverage run` directly
+# correct command: pytest tests --cov=sqladmin_inline --cov-branch --cov-report=term-missing
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "@overload",
+]
+show_missing = true

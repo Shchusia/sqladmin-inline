@@ -24,9 +24,10 @@ tasks:
     silent: true
 
   publishtest:
+    silent: true
     desc: Run tests and publish results to https://coveralls.io/
     cmds:
-      - uv run pytest tests --cov=tiny_ca --cov-branch --cov-report=term-missing --cov-report=xml -o log_cli=true
+      - uv run coverage run -m pytest tests -s --cov=sqladmin_inline  --cov-branch --cov-report=term-missing -o log_cli=true
       - coverage xml
       - coveralls
 

@@ -99,12 +99,13 @@ from sqladmin_inline import InlineModelAdmin, ModelViewWithInlines, setup_inline
 class TagInline(InlineModelAdmin, model=Tag):
     inline_label = "Tags"
     icon = "fas fa-tag"
-    layout = "sidebar"
+    # layout = "sidebar"
     column_list = [Tag.name]
     column_searchable_list = [Tag.name]
     page_size = 5
     can_delete = True
-
+    can_create = False
+    can_edit = True
     form_excluded_columns = ["post"]
 
 
@@ -115,7 +116,10 @@ class CommentInline(InlineModelAdmin, model=Comment):
     column_list = [Comment.body, Comment.author]
     column_searchable_list = [Comment.body]
     page_size = 3
-    can_delete = True
+    can_delete = False
+    # can_create = False
+    can_edit = False
+
     form_columns = [Comment.body, Comment.author]
 
     column_labels = {Comment.body: "Body", "author_id": "Author"}
@@ -129,7 +133,9 @@ class UserCommentInline(InlineModelAdmin, model=Comment):
     column_searchable_list = [Comment.body]
     page_size = 5
     can_delete = True
+    # can_create = False
     fk_attr = "author"
+    form_columns = [Comment.body, Comment.post]
 
 
 class UserAdminWithInlines(ModelViewWithInlines, model=User):

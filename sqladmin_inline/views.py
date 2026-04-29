@@ -116,6 +116,8 @@ class ModelViewWithInlines(ModelView):
                     "search_enabled": bool(inline_cls._search_columns()),
                     "icon": getattr(inline_cls, "icon", None),
                     "layout": getattr(inline_cls, "layout", "center"),
+                    "can_create": inline_cls.can_create,
+                    "can_edit": inline_cls.can_edit,
                     "can_delete": inline_cls.can_delete,
                     "form_class": FormClass,
                     "parent_pk": _encode_parent_pk(parent_obj) if parent_obj else "",
@@ -200,6 +202,8 @@ def setup_inline_routes(admin: Any) -> None:
             "pagination": pagination,
             "search": search,
             "search_enabled": bool(inline_cls._search_columns()),
+            "can_create": inline_cls.can_create,
+            "can_edit": inline_cls.can_edit,
             "can_delete": inline_cls.can_delete,
             "form_class": FormClass,
             "parent_pk": parent_pk_str,
@@ -219,6 +223,12 @@ def setup_inline_routes(admin: Any) -> None:
         inline_cls = _find_inline(identity, inline_id)
         if inline_cls is None:
             return JSONResponse({"error": "inline not found"}, status_code=404)
+
+        # Permission checks
+        if child_pk and not inline_cls.can_edit:
+            return JSONResponse({"error": "editing is not allowed"}, status_code=403)
+        if not child_pk and not inline_cls.can_create:
+            return JSONResponse({"error": "creating is not allowed"}, status_code=403)
 
         FormClass = await inline_cls.scaffold_form(view.session_maker)
         obj = None
@@ -293,6 +303,12 @@ def setup_inline_routes(admin: Any) -> None:
         form_data = await request.form()
         child_pk = form_data.get("_child_pk", "")
 
+        # Permission checks
+        if child_pk and not inline_cls.can_edit:
+            return JSONResponse({"error": "editing is not allowed"}, status_code=403)
+        if not child_pk and not inline_cls.can_create:
+            return JSONResponse({"error": "creating is not allowed"}, status_code=403)
+
         form = FormClass(form_data)
 
         if not form.validate():
@@ -337,6 +353,9 @@ def setup_inline_routes(admin: Any) -> None:
         if inline_cls is None:
             return JSONResponse({"error": "inline not found"}, status_code=404)
 
+        if not inline_cls.can_delete:
+            return JSONResponse({"error": "deletion is not allowed"}, status_code=403)
+
         body = await request.json()
         pks: list[str] = [str(p) for p in body.get("pks", [])]
         deleted = 0
@@ -380,6 +399,8 @@ def setup_inline_routes(admin: Any) -> None:
                     "search_enabled": bool(inline_cls._search_columns()),
                     "icon": getattr(inline_cls, "icon", None),
                     "layout": getattr(inline_cls, "layout", "center"),
+                    "can_create": inline_cls.can_create,
+                    "can_edit": inline_cls.can_edit,
                     "can_delete": inline_cls.can_delete,
                     "form_class": FormClass,
                     "parent_pk": parent_pk_str,

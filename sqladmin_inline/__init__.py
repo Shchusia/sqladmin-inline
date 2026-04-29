@@ -14,7 +14,12 @@ Usage::
 """
 
 from .inline import InlineModelAdmin
-from .views import ModelViewWithInlines, setup_inline_routes
+from .views import ModelViewWithInlines, register_inline_globals, setup_inline_routes
 
-__all__ = ["InlineModelAdmin", "ModelViewWithInlines", "setup_inline_routes"]
+__all__ = [
+    "InlineModelAdmin",
+    "ModelViewWithInlines",
+    "setup_inline_routes",
+    "register_inline_globals",
+]
 __version__ = "0.0.1"

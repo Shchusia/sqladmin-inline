@@ -2,6 +2,7 @@
 
 version: '3'
 
+dotenv: [ '.env' ]
 
 tasks:
   default:
@@ -27,7 +28,7 @@ tasks:
     silent: true
     desc: Run tests and publish results to https://coveralls.io/
     cmds:
-      - uv run coverage run -m pytest tests -s --cov=sqladmin_inline  --cov-branch --cov-report=term-missing -o log_cli=true
+      - uv run pytest tests --cov=sqladmin_inline --cov-branch --cov-report=term-missing --cov-report=xml -o log_cli=true
       - coverage xml
       - coveralls
 
@@ -38,7 +39,7 @@ tasks:
       - pre-commit run --all-files
 
   sync:
-    desc: ""
+    desc: "Sync libraries"
     cmds:
       - uv sync -U --group demo --group tests --group lint --group demo --active --inexact
 
@@ -46,8 +47,14 @@ tasks:
     desc: "Run Demo"
     cmds:
       - uv run python demo.py
+
   build:
     desc: Build library
     cmds:
       - rm -rf dist
       - uv build
+
+  publish:
+    desc: Publish the compiled library
+    cmds:
+      - uv publish

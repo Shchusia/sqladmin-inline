@@ -240,6 +240,8 @@ class InlineModelAdmin(metaclass=InlineModelAdminMeta):
     column_labels: ClassVar[dict[str, str]] = {}
     column_searchable_list: ClassVar[Sequence[Any]] = []
     page_size: ClassVar[int] = 5
+    can_create: ClassVar[bool] = True
+    can_edit: ClassVar[bool] = True
     can_delete: ClassVar[bool] = True
 
     # UI display

@@ -51,6 +51,7 @@
       {% endif %}
 
       {# Add button — stop click from toggling collapse #}
+      {% if can_create %}
       <div onclick="event.stopPropagation()">
         <button type="button"
                 class="btn btn-sm btn-primary inline-add-btn"
@@ -61,6 +62,7 @@
           <i class="fa fa-plus mr-1"></i>Add
         </button>
       </div>
+      {% endif %}
 
     </div>
   </div>
@@ -100,6 +102,7 @@
               <td>{{ il.get_display_value(row, col) }}</td>
               {% endfor %}
               <td class="text-right">
+                {% if can_edit %}
                 <a href="#"
                    class="text-muted inline-edit-btn"
                    data-inline="{{ iid }}"
@@ -110,6 +113,7 @@
                    title="Edit">
                   <i class="fa fa-pencil"></i>
                 </a>
+                {% endif %}
               </td>
             </tr>
             {% endfor %}

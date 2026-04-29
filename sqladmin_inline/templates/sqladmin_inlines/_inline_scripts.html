@@ -1,0 +1,294 @@
+{# ── Inline modal markup ── #}
+<div class="modal fade" id="inline-modal" tabindex="-1" role="dialog" aria-hidden="true">
+  <div class="modal-dialog modal-dialog-centered modal-lg" role="document">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="inline-modal-title">Add</h5>
+        <button type="button" class="close" data-dismiss="modal" aria-label="Close">
+          <span aria-hidden="true">&times;</span>
+        </button>
+      </div>
+      <div class="modal-body" id="inline-modal-body">
+        <div class="text-center py-4 text-muted">
+          <div class="spinner-border spinner-border-sm" role="status"></div>
+          Loading…
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" data-dismiss="modal">Cancel</button>
+        <button type="button" class="btn btn-primary" id="inline-modal-save">
+          <span class="spinner-border spinner-border-sm d-none mr-1" id="inline-modal-spinner"></span>
+          Save
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+{# ── Delete confirmation modal ── #}
+<div class="modal fade" id="inline-delete-modal" tabindex="-1" role="dialog" aria-hidden="true">
+  <div class="modal-dialog modal-sm modal-dialog-centered" role="document">
+    <div class="modal-content">
+      <div class="modal-body text-center py-4">
+        <i class="fa-solid fa-triangle-exclamation text-danger fa-2x mb-3 d-block"></i>
+        <h4>Delete items?</h4>
+        <p class="text-muted mb-0" id="inline-delete-text"></p>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-secondary flex-grow-1" data-dismiss="modal">Cancel</button>
+        <button class="btn btn-danger flex-grow-1" id="inline-delete-confirm">
+          <span class="spinner-border spinner-border-sm d-none mr-1" id="inline-delete-spinner"></span>
+          Delete
+        </button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<script>
+(function ($) {
+  "use strict";
+
+  // -------------------------------------------------------------------------
+  // Reload an inline section via AJAX
+  // -------------------------------------------------------------------------
+  function reloadSection(inlineId, listUrl) {
+    $.get(listUrl).done(function (html) {
+      var $section = $("#inline-" + inlineId);
+      if (!$section.length) return;
+      var $new = $(html).filter("#inline-" + inlineId);
+      if (!$new.length) {
+        // html might be the card itself without a wrapper
+        var $parsed = $("<div>").html(html);
+        $new = $parsed.find("#inline-" + inlineId);
+        if (!$new.length) $new = $parsed;
+      }
+      $section.replaceWith($new);
+      bindAll();
+    }).fail(function (xhr) {
+      console.error("Inline reload failed:", xhr.responseText);
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // Open the add/edit modal
+  // -------------------------------------------------------------------------
+  var _currentInlineId = "";
+  var _currentListUrl  = "";
+
+  function openModal(title, formUrl, inlineId, listUrl) {
+    _currentInlineId = inlineId;
+    _currentListUrl  = listUrl;
+    $("#inline-modal-title").text(title);
+    $("#inline-modal-body").html(
+      '<div class="text-center py-4 text-muted">' +
+      '<div class="spinner-border spinner-border-sm"></div> Loading…</div>'
+    );
+    $("#inline-modal").modal("show");
+    $.get(formUrl).done(function (html) {
+      $("#inline-modal-body").html(html);
+    }).fail(function (xhr) {
+      $("#inline-modal-body").html(
+        '<div class="alert alert-danger">' + (xhr.responseText || "Load failed") + "</div>"
+      );
+    });
+  }
+    // -------------------------------------------------------------------------
+  // Close modal handlers
+  // -------------------------------------------------------------------------
+  $(document).on("click", "#inline-modal .close", function () {
+    $("#inline-modal").modal("hide");
+  });
+
+  $(document).on("click", "#inline-modal .btn-secondary", function () {
+    $("#inline-modal").modal("hide");
+  });
+
+
+  // -------------------------------------------------------------------------
+  // Save button inside modal
+  // -------------------------------------------------------------------------
+  $(document).on("click", "#inline-modal-save", function () {
+    var $form = $("#inline-modal-form");
+    if (!$form.length) return;
+
+    var saveUrl = $form.data("save-url");
+    var listUrl = $form.data("list-url");
+    var inlineId = listUrl ? listUrl.split("/inline/")[1].split("/")[0] : _currentInlineId;
+
+    $("#inline-modal-spinner").removeClass("d-none");
+    $("#inline-modal-save").prop("disabled", true);
+
+    $.ajax({
+      url:         saveUrl,
+      method:      "POST",
+      data:        new FormData($form[0]),
+      processData: false,
+      contentType: false,
+    }).done(function (resp) {
+      if (resp && resp.ok) {
+        $("#inline-modal").modal("hide");
+        reloadSection(inlineId, listUrl || _currentListUrl);
+      } else {
+        alert("Error: " + JSON.stringify(resp));
+      }
+    }).fail(function (xhr) {
+      if (xhr.status === 422) {
+        // Validation errors — server returns rendered form HTML
+        $("#inline-modal-body").html(xhr.responseText);
+      } else {
+        alert("Save failed: " + (xhr.responseJSON && xhr.responseJSON.error || xhr.responseText));
+      }
+    }).always(function () {
+      $("#inline-modal-spinner").addClass("d-none");
+      $("#inline-modal-save").prop("disabled", false);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Pending delete state
+  // -------------------------------------------------------------------------
+  var _pendingDelete = { url: "", listUrl: "", pks: [], inlineId: "" };
+
+  $(document).on("click", "#inline-delete-confirm", function () {
+    var $spinner = $("#inline-delete-spinner");
+    var $btn     = $(this);
+    $spinner.removeClass("d-none");
+    $btn.prop("disabled", true);
+
+    $.ajax({
+      url:         _pendingDelete.url,
+      method:      "DELETE",
+      contentType: "application/json",
+      data:        JSON.stringify({ pks: _pendingDelete.pks }),
+    }).done(function () {
+      $("#inline-delete-modal").modal("hide");
+      reloadSection(_pendingDelete.inlineId, _pendingDelete.listUrl);
+    }).fail(function (xhr) {
+      alert("Delete failed: " + (xhr.responseJSON && xhr.responseJSON.error || xhr.responseText));
+    }).always(function () {
+      $spinner.addClass("d-none");
+      $btn.prop("disabled", false);
+    });
+  });
+
+  // -------------------------------------------------------------------------
+  // Event binding (called after every section reload)
+  // -------------------------------------------------------------------------
+  function bindAll() {
+
+    // ── Add button ──────────────────────────────────────────────────────────
+    $(".inline-add-btn").off("click.inline").on("click.inline", function () {
+      var $btn     = $(this);
+      var inlineId = $btn.data("inline");
+      var formUrl  = $btn.data("form-url");
+      var label    = $btn.data("label");
+      var listUrl  = formUrl.replace(/\/form.*$/, "/list");
+      openModal("Add " + label, formUrl, inlineId, listUrl);
+    });
+
+    // ── Edit button ─────────────────────────────────────────────────────────
+    $(".inline-edit-btn").off("click.inline").on("click.inline", function (e) {
+      e.preventDefault();
+      var $a       = $(this);
+      var inlineId = $a.data("inline");
+      var formUrl  = $a.data("form-url");
+      var label    = $a.data("label");
+      var listUrl  = formUrl.split("?")[0].replace(/\/form$/, "/list");
+      openModal("Edit " + label, formUrl, inlineId, listUrl);
+    });
+
+    // ── Pagination ──────────────────────────────────────────────────────────
+    $(".inline-page-link").off("click.inline").on("click.inline", function (e) {
+      e.preventDefault();
+      var $a       = $(this);
+      var inlineId = $a.data("inline");
+      var url      = $a.data("url");
+      reloadSection(inlineId, url);
+    });
+
+    // ── Search button ───────────────────────────────────────────────────────
+    $(".inline-search-btn").off("click.inline").on("click.inline", function () {
+      var inlineId = $(this).data("inline");
+      submitSearch(inlineId);
+    });
+
+    // ── Search input Enter key ──────────────────────────────────────────────
+    $(".inline-search-input").off("keydown.inline").on("keydown.inline", function (e) {
+      if (e.which === 13) {
+        e.preventDefault();
+        submitSearch($(this).data("inline"));
+      }
+    });
+
+    // ── Search clear ────────────────────────────────────────────────────────
+    $(".inline-search-clear").off("click.inline").on("click.inline", function () {
+      var inlineId = $(this).data("inline");
+      var baseUrl  = $(this).data("base-url");
+      reloadSection(inlineId, baseUrl + "?search=&page=1");
+    });
+
+    // ── Select all ──────────────────────────────────────────────────────────
+    $(".inline-select-all").off("change.inline").on("change.inline", function () {
+      var inlineId = $(this).data("inline");
+      var checked  = this.checked;
+      $(".inline-select-box[data-inline='" + inlineId + "']").prop("checked", checked);
+      updateBulkBtn(inlineId);
+    });
+
+    // ── Individual checkboxes ────────────────────────────────────────────────
+    $(".inline-select-box").off("change.inline").on("change.inline", function () {
+      updateBulkBtn($(this).data("inline"));
+    });
+
+    // ── Bulk delete button ───────────────────────────────────────────────────
+    $(".inline-bulk-delete").off("click.inline").on("click.inline", function () {
+      var $btn     = $(this);
+      var inlineId = $btn.data("inline");
+      var pks = $(".inline-select-box[data-inline='" + inlineId + "']:checked")
+                  .map(function () { return $(this).data("pk"); })
+                  .get();
+      if (!pks.length) return;
+      _pendingDelete = {
+        url:      $btn.data("delete-url"),
+        listUrl:  $btn.data("list-url"),
+        pks:      pks,
+        inlineId: inlineId,
+      };
+      $("#inline-delete-text").text(
+        "This will permanently delete " + pks.length + " item(s)."
+      );
+      $("#inline-delete-modal").modal("show");
+    });
+  }
+
+  function submitSearch(inlineId) {
+    var $input  = $(".inline-search-input[data-inline='" + inlineId + "']");
+    var baseUrl = $input.data("base-url");
+    var term    = encodeURIComponent($input.val().trim());
+    reloadSection(inlineId, baseUrl + "?search=" + term + "&page=1");
+  }
+
+  function updateBulkBtn(inlineId) {
+    var count = $(".inline-select-box[data-inline='" + inlineId + "']:checked").length;
+    var $btn  = $(".inline-bulk-delete[data-inline='" + inlineId + "']");
+    $btn.toggleClass("d-none", count === 0);
+  }
+
+  // ── Collapse icon rotation ────────────────────────────────────────────────
+  $(document).on('show.bs.collapse', '.inline-section .collapse', function () {
+    var iid = this.id.replace('inline-body-', '');
+    $('#inline-icon-' + iid).css('transform', 'rotate(0deg)');
+  });
+  $(document).on('hide.bs.collapse', '.inline-section .collapse', function () {
+    var iid = this.id.replace('inline-body-', '');
+    $('#inline-icon-' + iid).css('transform', 'rotate(-90deg)');
+  });
+
+  // Initial bind on DOM ready
+  $(document).ready(function () {
+    bindAll();
+  });
+
+}(jQuery));
+</script>

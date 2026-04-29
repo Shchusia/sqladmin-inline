@@ -1,0 +1,154 @@
+{% extends "sqladmin/layout.html" %}
+{% block extra_css %}
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.2/css/all.min.css">
+  <style>
+    .inline-collapse-icon { transition: transform 0.2s; }
+    [aria-expanded="true"] .inline-collapse-icon { transform: rotate(0deg); }
+    [aria-expanded="false"] .inline-collapse-icon { transform: rotate(-90deg); }
+  </style>
+{% endblock %}
+{% from 'sqladmin/_macros.html' import render_form_fields %}
+
+{% set sidebar_inlines = inline_contexts | selectattr("layout", "equalto", "sidebar") | list if inline_contexts else [] %}
+{% set center_inlines  = inline_contexts | rejectattr("layout", "equalto", "sidebar") | list if inline_contexts else [] %}
+
+{% block content %}
+<div class="col-12" style="display:block">
+<form action="{{ model_view._build_url_for('admin:edit', request, obj) }}"
+      method="POST" enctype="multipart/form-data" id="edit-form">
+
+  {% if sidebar_inlines %}
+  {# ── Two-column layout: form+center on left, sidebar on right ── #}
+  <div class="row" style="--tblr-gutter-x:1rem">
+
+    {# Left column #}
+    <div class="col-lg-8" style="display:block">
+
+      <div class="card">
+        <div class="card-header">
+          <h3 class="card-title">Edit {{ model_view.name }}</h3>
+        </div>
+        <div class="card-body border-bottom py-3">
+          {% if error %}<div class="alert alert-danger">{{ error }}</div>{% endif %}
+          <fieldset class="form-fieldset">
+            {{ render_form_fields(form, form_opts=form_opts,
+               ajax_lookup_url=url_for('admin:ajax_lookup', identity=model_view.identity)) }}
+          </fieldset>
+        </div>
+      </div>
+
+      {% for ctx in center_inlines %}
+        {% with inline_cls=ctx.inline_cls, identity=ctx.identity,
+                parent_identity=model_view.identity, prefix=ctx.prefix,
+                label=ctx.label, icon=ctx.icon,
+                display_columns=ctx.display_columns, column_labels=ctx.column_labels,
+                pagination=ctx.pagination, search=ctx.search,
+                search_enabled=ctx.search_enabled, can_delete=ctx.can_delete,
+                form_class=ctx.form_class, parent_pk=ctx.parent_pk %}
+          {% include "sqladmin_inlines/_inline_table.html" %}
+        {% endwith %}
+      {% endfor %}
+
+      {# Save buttons #}
+      <div class="card mt-3">
+        <div class="card-body py-3">
+          <div class="row align-items-center">
+            <div class="col-auto">
+              <a href="{{ url_for('admin:list', identity=model_view.identity) }}" class="btn">Cancel</a>
+            </div>
+            <div class="col-auto">
+              <div class="btn-group flex-wrap">
+                <input type="submit" name="save" value="Save" class="btn btn-primary">
+                <input type="submit" name="save" value="Save and continue editing" class="btn">
+                {% if model_view.can_create %}
+                  {% if model_view.save_as %}
+                  <input type="submit" name="save" value="Save as new" class="btn">
+                  {% else %}
+                  <input type="submit" name="save" value="Save and add another" class="btn">
+                  {% endif %}
+                {% endif %}
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </div>{# /col-lg-8 #}
+
+    {# Right sidebar column #}
+    <div class="col-lg-4" style="display:block">
+      {% for ctx in sidebar_inlines %}
+        {% with inline_cls=ctx.inline_cls, identity=ctx.identity,
+                parent_identity=model_view.identity, prefix=ctx.prefix,
+                label=ctx.label, icon=ctx.icon,
+                display_columns=ctx.display_columns, column_labels=ctx.column_labels,
+                pagination=ctx.pagination, search=ctx.search,
+                search_enabled=ctx.search_enabled, can_delete=ctx.can_delete,
+                form_class=ctx.form_class, parent_pk=ctx.parent_pk %}
+          {% include "sqladmin_inlines/_inline_table.html" %}
+        {% endwith %}
+      {% endfor %}
+    </div>
+
+  </div>{# /row #}
+
+  {% else %}
+  {# ── Full-width layout (no sidebar inlines) ── #}
+
+    <div class="card">
+      <div class="card-header">
+        <h3 class="card-title">Edit {{ model_view.name }}</h3>
+      </div>
+      <div class="card-body border-bottom py-3">
+        {% if error %}<div class="alert alert-danger">{{ error }}</div>{% endif %}
+        <fieldset class="form-fieldset">
+          {{ render_form_fields(form, form_opts=form_opts,
+             ajax_lookup_url=url_for('admin:ajax_lookup', identity=model_view.identity)) }}
+        </fieldset>
+      </div>
+    </div>
+
+    {% for ctx in center_inlines %}
+      {% with inline_cls=ctx.inline_cls, identity=ctx.identity,
+              parent_identity=model_view.identity, prefix=ctx.prefix,
+              label=ctx.label, icon=ctx.icon,
+              display_columns=ctx.display_columns, column_labels=ctx.column_labels,
+              pagination=ctx.pagination, search=ctx.search,
+              search_enabled=ctx.search_enabled, can_delete=ctx.can_delete,
+              form_class=ctx.form_class, parent_pk=ctx.parent_pk %}
+        {% include "sqladmin_inlines/_inline_table.html" %}
+      {% endwith %}
+    {% endfor %}
+
+    <div class="card mt-3">
+      <div class="card-body py-3">
+        <div class="row align-items-center">
+          <div class="col-auto">
+            <a href="{{ url_for('admin:list', identity=model_view.identity) }}" class="btn">Cancel</a>
+          </div>
+          <div class="col-auto">
+            <div class="btn-group flex-wrap">
+              <input type="submit" name="save" value="Save" class="btn btn-primary">
+              <input type="submit" name="save" value="Save and continue editing" class="btn">
+              {% if model_view.can_create %}
+                {% if model_view.save_as %}
+                <input type="submit" name="save" value="Save as new" class="btn">
+                {% else %}
+                <input type="submit" name="save" value="Save and add another" class="btn">
+                {% endif %}
+              {% endif %}
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  {% endif %}
+
+</form>
+</div>
+{% endblock %}
+
+{% block tail %}
+{% include "sqladmin_inlines/_inline_scripts.html" %}
+{% endblock %}

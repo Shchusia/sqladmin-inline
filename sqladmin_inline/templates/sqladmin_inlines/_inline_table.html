@@ -1,0 +1,190 @@
+{% set il = inline_cls %}
+{% set iid = identity %}
+{% set pp = parent_pk %}
+{% set base_url = "/admin/" ~ parent_identity ~ "/inline/" ~ iid ~ "/" ~ pp %}
+
+<div class="inline-section card mt-3" id="inline-{{ iid }}">
+
+  {# ── Header with collapse toggle ── #}
+  <div class="card-header"
+       style="cursor:pointer; user-select:none;"
+       data-toggle="collapse"
+       data-target="#inline-body-{{ iid }}"
+       aria-expanded="true">
+    <div class="d-flex align-items-center w-100" style="gap:10px">
+
+      {# Collapse arrow #}
+      <i class="fa fa-chevron-down inline-collapse-icon text-muted"
+         id="inline-icon-{{ iid }}"
+         style="transition: transform 0.2s; font-size:12px; flex-shrink:0"></i>
+
+      <h4 class="card-title mb-0 flex-grow-1">
+        {% if icon %}<i class="{{ icon }} mr-1 text-muted"></i>{% endif %}
+        {{ label }}
+        <span class="badge badge-secondary ml-2" style="font-size:11px">{{ pagination.count }}</span>
+      </h4>
+
+      {# Search — stop click from toggling collapse #}
+      {% if search_enabled %}
+      <div class="d-flex align-items-center" style="gap:6px" onclick="event.stopPropagation()">
+        <div class="input-group input-group-sm" style="width:200px">
+          <input type="text"
+                 class="form-control inline-search-input"
+                 placeholder="Search…"
+                 value="{{ search }}"
+                 data-inline="{{ iid }}"
+                 data-base-url="{{ base_url }}/list">
+          <div class="input-group-append">
+            <button class="btn btn-sm btn-light inline-search-btn" type="button"
+                    data-inline="{{ iid }}">
+              <i class="fa fa-search"></i>
+            </button>
+            {% if search %}
+            <button class="btn btn-sm btn-light inline-search-clear" type="button"
+                    data-inline="{{ iid }}" data-base-url="{{ base_url }}/list">
+              <i class="fa fa-times"></i>
+            </button>
+            {% endif %}
+          </div>
+        </div>
+      </div>
+      {% endif %}
+
+      {# Add button — stop click from toggling collapse #}
+      <div onclick="event.stopPropagation()">
+        <button type="button"
+                class="btn btn-sm btn-primary inline-add-btn"
+                data-inline="{{ iid }}"
+                data-form-url="{{ base_url }}/form"
+                data-list-url="{{ base_url }}/list"
+                data-label="{{ label }}">
+          <i class="fa fa-plus mr-1"></i>Add
+        </button>
+      </div>
+
+    </div>
+  </div>
+
+  {# ── Collapsible body ── #}
+  <div class="collapse show" id="inline-body-{{ iid }}">
+
+    {# ── Table ── #}
+    <div class="table-responsive">
+      <table class="table table-vcenter card-table mb-0">
+        <thead>
+          <tr>
+            {% if can_delete %}
+            <th class="w-1 pr-0">
+              <input class="form-check-input m-0 inline-select-all" type="checkbox"
+                     data-inline="{{ iid }}">
+            </th>
+            {% endif %}
+            {% for col in display_columns %}
+            <th>{{ column_labels[col] }}</th>
+            {% endfor %}
+            <th class="w-1"></th>
+          </tr>
+        </thead>
+        <tbody>
+          {% if pagination.rows %}
+            {% for row in pagination.rows %}
+            {% set row_pk = il.encode_pk(row) %}
+            <tr>
+              {% if can_delete %}
+              <td class="pr-0">
+                <input class="form-check-input m-0 inline-select-box" type="checkbox"
+                       data-inline="{{ iid }}" data-pk="{{ row_pk }}">
+              </td>
+              {% endif %}
+              {% for col in display_columns %}
+              <td>{{ il.get_display_value(row, col) }}</td>
+              {% endfor %}
+              <td class="text-right">
+                <a href="#"
+                   class="text-muted inline-edit-btn"
+                   data-inline="{{ iid }}"
+                   data-pk="{{ row_pk }}"
+                   data-form-url="{{ base_url }}/form?pk={{ row_pk }}"
+                   data-list-url="{{ base_url }}/list"
+                   data-label="{{ label }}"
+                   title="Edit">
+                  <i class="fa fa-pencil"></i>
+                </a>
+              </td>
+            </tr>
+            {% endfor %}
+          {% else %}
+          <tr>
+            <td colspan="{{ display_columns|length + (2 if can_delete else 1) }}"
+                class="text-center text-muted py-4">
+              {% if search %}
+                No results for "<strong>{{ search }}</strong>"
+              {% else %}
+                No {{ label }} yet — click <strong>Add</strong> to create one.
+              {% endif %}
+            </td>
+          </tr>
+          {% endif %}
+        </tbody>
+      </table>
+    </div>
+
+    {# ── Footer: bulk delete + count + pagination ── #}
+    {% if can_delete or pagination.total_pages > 1 or pagination.count > 0 %}
+    <div class="card-footer d-flex align-items-center flex-wrap" style="gap:10px; min-height:48px">
+
+      {% if can_delete %}
+      <button type="button"
+              class="btn btn-sm btn-danger inline-bulk-delete d-none"
+              data-inline="{{ iid }}"
+              data-delete-url="{{ base_url }}/delete"
+              data-list-url="{{ base_url }}/list?page={{ pagination.page }}&search={{ search }}">
+        <i class="fa fa-trash mr-1"></i>Delete selected
+      </button>
+      {% endif %}
+
+      <span class="text-muted small">
+        {% if pagination.count > 0 %}
+          Showing
+          {{ (pagination.page - 1) * pagination.page_size + 1 }}–{{ [pagination.page * pagination.page_size, pagination.count] | min }}
+          of {{ pagination.count }}
+        {% else %}
+          0 items
+        {% endif %}
+      </span>
+
+      {% if pagination.total_pages > 1 %}
+      <ul class="pagination pagination-sm m-0 ml-auto">
+        <li class="page-item {{ 'disabled' if not pagination.has_previous }}">
+          <a class="page-link inline-page-link" href="#"
+             data-inline="{{ iid }}"
+             data-url="{{ base_url }}/list?page={{ pagination.page - 1 }}&search={{ search }}">
+            <i class="fa fa-chevron-left"></i>
+          </a>
+        </li>
+        {% for p in pagination.page_range %}
+          {% if p is none %}
+          <li class="page-item disabled"><span class="page-link">…</span></li>
+          {% else %}
+          <li class="page-item {{ 'active' if p == pagination.page }}">
+            <a class="page-link inline-page-link" href="#"
+               data-inline="{{ iid }}"
+               data-url="{{ base_url }}/list?page={{ p }}&search={{ search }}">{{ p }}</a>
+          </li>
+          {% endif %}
+        {% endfor %}
+        <li class="page-item {{ 'disabled' if not pagination.has_next }}">
+          <a class="page-link inline-page-link" href="#"
+             data-inline="{{ iid }}"
+             data-url="{{ base_url }}/list?page={{ pagination.page + 1 }}&search={{ search }}">
+            <i class="fa fa-chevron-right"></i>
+          </a>
+        </li>
+      </ul>
+      {% endif %}
+
+    </div>
+    {% endif %}
+
+  </div>{# /.collapse #}
+</div>{# /.card #}

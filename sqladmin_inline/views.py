@@ -119,6 +119,10 @@ class ModelViewWithInlines(ModelView):
                     "can_create": inline_cls.can_create,
                     "can_edit": inline_cls.can_edit,
                     "can_delete": inline_cls.can_delete,
+                    "order_field": getattr(inline_cls, "order_field", None),
+                    "column_default_sort": getattr(
+                        inline_cls, "column_default_sort", None
+                    ),
                     "form_class": FormClass,
                     "parent_pk": _encode_parent_pk(parent_obj) if parent_obj else "",
                 }
@@ -197,6 +201,8 @@ def setup_inline_routes(admin: Any) -> None:
             "parent_identity": identity,
             "prefix": _prefix(inline_cls),
             "label": inline_cls.inline_label,
+            "icon": getattr(inline_cls, "icon", None),
+            "layout": getattr(inline_cls, "layout", "center"),
             "display_columns": display_cols,
             "column_labels": {c: inline_cls._get_label(c) for c in display_cols},
             "pagination": pagination,
@@ -205,6 +211,8 @@ def setup_inline_routes(admin: Any) -> None:
             "can_create": inline_cls.can_create,
             "can_edit": inline_cls.can_edit,
             "can_delete": inline_cls.can_delete,
+            "order_field": getattr(inline_cls, "order_field", None),
+            "column_default_sort": getattr(inline_cls, "column_default_sort", None),
             "form_class": FormClass,
             "parent_pk": parent_pk_str,
         }
@@ -402,6 +410,10 @@ def setup_inline_routes(admin: Any) -> None:
                     "can_create": inline_cls.can_create,
                     "can_edit": inline_cls.can_edit,
                     "can_delete": inline_cls.can_delete,
+                    "order_field": getattr(inline_cls, "order_field", None),
+                    "column_default_sort": getattr(
+                        inline_cls, "column_default_sort", None
+                    ),
                     "form_class": FormClass,
                     "parent_pk": parent_pk_str,
                 }
@@ -499,6 +511,42 @@ def setup_inline_routes(admin: Any) -> None:
             )
             break
     admin.admin.router.routes = existing_routes
+
+    # Register reorder route
+    async def inline_reorder(request: Request) -> Response:
+        """POST handler to reorder a child record (drag-and-drop)."""
+        identity = request.path_params["identity"]
+        inline_id = request.path_params["inline_identity"]
+
+        inline_cls = _find_inline(identity, inline_id)
+        if inline_cls is None or inline_cls.order_field is None:
+            return JSONResponse({"error": "reorder not supported"}, status_code=404)
+
+        view = _find_view(identity)
+        if view is None:
+            return JSONResponse({"error": "view not found"}, status_code=404)
+
+        try:
+            body = await request.json()
+            ordered_pks = body.get("pks", [])  # list of pk strings in new order
+            for position, pk_str in enumerate(ordered_pks, start=1):
+                await inline_cls.reorder_child(
+                    view.session_maker, str(pk_str), position
+                )
+            return JSONResponse({"ok": True})
+        except Exception as exc:
+            logger.exception(exc)
+            return JSONResponse({"error": str(exc)}, status_code=500)
+
+    existing_routes2 = list(admin.admin.router.routes)
+    existing_routes2.append(
+        _Route(
+            "/{identity}/inline/{inline_identity}/reorder",
+            endpoint=inline_reorder,
+            methods=["POST"],
+        )
+    )
+    admin.admin.router.routes = existing_routes2
 
     new_routes = [
         Route(

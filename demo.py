@@ -1,15 +1,15 @@
 """
 demo.py — sqladmin-inline demo.
 
-Демонстрирует все возможности инлайнов:
+Demonstrates all inline features:
   - icon, layout (sidebar / center)
   - can_create, can_edit, can_delete
-  - column_default_sort  — сортировка по полю
-  - order_field          — drag-and-drop перетаскивание строк
-  - Load More            — подгрузка следующей страницы
-  - FK-select            — выбор связанного объекта
+  - column_default_sort  — sorting by field
+  - order_field          — drag-and-drop row reordering
+  - Load More            — next page loading
+  - FK-select            — related object selection
 
-Запуск:
+Run:
     rm -f demo.db && python demo.py
     → http://localhost:8000/admin
 """
@@ -80,7 +80,7 @@ class Post(Base):
 
 class Tag(Base):
     """
-    Тег с полем position для drag-and-drop сортировки.
+    Tag with position field for drag-and-drop sorting.
     """
 
     __tablename__ = "tags"
@@ -95,7 +95,7 @@ class Tag(Base):
 
 
 class Comment(Base):
-    """Comment с FK на User (author) — демонстрирует FK-select в форме."""
+    """Comment with FK to User (author) — demonstrates FK-select in form."""
 
     __tablename__ = "comments"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -121,76 +121,76 @@ class Comment(Base):
 
 class TagInline(InlineModelAdmin, model=Tag):
     """
-    Теги — sidebar, drag-and-drop по полю position.
+    Tags — sidebar, drag-and-drop via position field.
 
-    Особенности:
-    - layout = "sidebar"  → отображается справа
-    - order_field = "position" → строки перетаскиваются мышью,
-      position обновляется автоматически через /reorder
-    - column_default_sort не нужен: order_field имеет приоритет
-    - can_create = False → нет кнопки Add (только drag)
+    Features:
+    - layout = "sidebar"  → displayed on the right side
+    - order_field = "position" → rows are draggable,
+      position updates automatically via /reorder
+    - column_default_sort not needed: order_field takes priority
+    - can_create = True → Add button enabled
     """
 
     inline_label = "Tags"
     icon = "fas fa-tag"
     # layout        = "sidebar"
 
-    # Drag-and-drop: integer поле порядка
+    # Drag-and-drop: integer order field
     order_field = "position"
 
-    column_list = [Tag.name]  # position показывается как # автоматически
+    column_list = [Tag.name]  # position is shown as # automatically
     column_labels = {Tag.name: "Tag name"}
     column_searchable_list = [Tag.name]
     page_size = 5
     can_delete = True
     can_create = True
-    can_edit = False
+    can_edit = True
     form_excluded_columns = ["post"]
 
 
 class CommentInline(InlineModelAdmin, model=Comment):
     """
-    Комментарии — center, сортировка по ID desc, FK-select на User.
+    Comments — center, sorted by ID desc, FK-select for User.
 
-    Особенности:
-    - column_default_sort = ("id", True)  → новые сверху
-    - page_size = 3 → при 4+ комментариях появляется кнопка "Load more"
-    - can_delete = False → нет чекбоксов удаления
-    - can_edit = False   → нет кнопки карандаша
-    - form_columns включает Comment.author → FK-select
+    Features:
+    - column_default_sort = ("id", True)  → new ones on top
+    - page_size = 3 → "Load more" button appears with 4+ comments
+    - can_delete = True → deletion enabled
+    - can_edit = False   → no edit button
+    - form_columns includes Comment.author → FK-select
     """
 
     inline_label = "Comments"
     icon = "fa fa-comments"
     layout = "center"
 
-    # Сортировка: новые сверху
+    # Sorting: new ones on top
     column_default_sort = ("id", True)
 
     column_list = [Comment.body, Comment.author]
     column_labels = {Comment.body: "Text", "author": "Author"}
     column_searchable_list = [Comment.body]
-    page_size = 3  # намеренно мало, чтобы показать Load More
+    page_size = 3  # intentionally small to demonstrate Load More
     can_delete = True
     can_create = True
-    can_edit = False
+    can_edit = True
     form_columns = [Comment.body, Comment.author]
 
 
 class UserCommentInline(InlineModelAdmin, model=Comment):
     """
-    Комментарии пользователя — FK по author, drag-and-drop по ID нет,
-    зато есть сортировка по body и Load More.
+    User comments — FK by author, no drag-and-drop by ID,
+    but sorting by body and Load More are available.
     """
 
     inline_label = "My Comments"
     icon = "fas fa-comments"
     layout = "center"
-    column_default_sort = ("id", False)  # старые сверху
+    column_default_sort = ("id", False)  # old ones on top
 
     column_list = [Comment.body, Comment.post]
     column_searchable_list = [Comment.body]
-    page_size = 2  # мало для демонстрации Load More
+    page_size = 2  # small to demonstrate Load More
     can_delete = True
     can_create = True
     can_edit = True
@@ -284,7 +284,7 @@ async def seed_db() -> None:
         s.add_all([p1, p2, p3])
         await s.flush()
 
-        # Теги с position — попробуйте перетащить в admin!
+        # Tags with position — try dragging in admin!
         s.add_all(
             [
                 Tag(name="python", position=1, post=p1),
@@ -296,7 +296,7 @@ async def seed_db() -> None:
             ]
         )
 
-        # Комментариев больше page_size=3 → покажется Load More
+        # Comments count exceeds page_size=3 → Load More will be shown
         s.add_all(
             [
                 Comment(body="Great post!", author=alice_u, post=p1),
@@ -340,22 +340,22 @@ if __name__ == "__main__":
     print("  sqladmin-inline demo")
     print("  → http://localhost:8000/admin")
     print()
-    print("  Posts → открой любой пост:")
+    print("  Posts → open any post:")
     print()
-    print("  Tags (sidebar, справа):")
-    print("    • order_field='position' → перетаскивай строки мышью")
-    print("    • иконка ⠿ слева — drag handle")
-    print("    • порядок сохраняется в БД автоматически")
+    print("  Tags (sidebar, on the right):")
+    print("    • order_field='position' → drag rows with mouse")
+    print("    • ⠿ icon on the left — drag handle")
+    print("    • order is saved to DB automatically")
     print()
-    print("  Comments (center, под формой):")
-    print("    • column_default_sort=('id', True) → новые сверху")
-    print("    • page_size=3, комментариев 4 → кнопка 'Load more'")
-    print("    • Author — FK-select на таблицу Users")
-    print("    • can_edit=False → нет карандаша")
-    print("    • can_delete=False → нет чекбоксов")
+    print("  Comments (center, below the form):")
+    print("    • column_default_sort=('id', True) → new ones on top")
+    print("    • page_size=3, total comments 4 → 'Load more' button")
+    print("    • Author — FK-select to Users table")
+    print("    • can_edit=False → no edit pencil")
+    print("    • can_delete=True → deletion enabled")
     print()
-    print("  Users (inlines) → открой пользователя:")
-    print("    • UserCommentInline: page_size=2 → Load More активен")
+    print("  Users (inlines) → open a user:")
+    print("    • UserCommentInline: page_size=2 → Load More active")
     print("=" * 60)
     print()
     uvicorn.run(app, host="0.0.0.0", port=8001, reload=False)

@@ -248,6 +248,13 @@ class InlineModelAdmin(metaclass=InlineModelAdminMeta):
     icon: ClassVar[str | None] = None  # e.g. "fa fa-tag", "ti ti-tag"
     layout: ClassVar[str] = "center"  # "center" or "sidebar"
 
+    # Sorting: (column_name, is_descending) or None for default (PK asc)
+    column_default_sort: ClassVar[tuple[str, bool] | None] = None
+
+    # Drag-and-drop ordering field: integer column name for manual order
+    # e.g. order_field = "position" — must be an Integer column on the model
+    order_field: ClassVar[str | None] = None
+
     form_columns: ClassVar[Sequence[Any]] = []
     form_excluded_columns: ClassVar[Sequence[Any]] = []
     form_args: ClassVar[dict[str, Any]] = {}
@@ -481,6 +488,25 @@ class InlineModelAdmin(metaclass=InlineModelAdminMeta):
             for opt in eager_options:
                 row_stmt = row_stmt.options(opt)
 
+            # Apply ordering
+            if cls.order_field is not None:
+                # Manual drag-and-drop order field takes priority
+                order_col = getattr(cls.model, cls.order_field, None)
+                if order_col is not None:
+                    row_stmt = row_stmt.order_by(order_col.asc())
+            elif cls.column_default_sort is not None:
+                sort_col_name, sort_desc = cls.column_default_sort
+                sort_col = getattr(cls.model, sort_col_name, None)
+                if sort_col is not None:
+                    row_stmt = row_stmt.order_by(
+                        sort_col.desc() if sort_desc else sort_col.asc()
+                    )
+            else:
+                # Default: sort by PK ascending
+                pk_col = cls.pk_columns[0] if cls.pk_columns else None
+                if pk_col is not None:
+                    row_stmt = row_stmt.order_by(getattr(cls.model, pk_col.key).asc())
+
             row_stmt = row_stmt.offset(offset).limit(cls.page_size)
             rows = list((await session.execute(row_stmt)).scalars().all())
             return rows, total
@@ -665,6 +691,46 @@ class InlineModelAdmin(metaclass=InlineModelAdminMeta):
             if obj is None:
                 return False
             await session.delete(obj)
+            await session.commit()
+            return True
+
+        if is_async_session_maker(session_maker):
+            async with session_maker() as session:
+                return await _do(session)
+        return False
+
+    # -----------------------------------------------------------------------
+    # Drag-and-Drop Reordering
+    # -----------------------------------------------------------------------
+
+    @classmethod
+    async def reorder_child(
+        cls,
+        session_maker: SESSION_MAKER,
+        pk_str: str,
+        new_position: int,
+    ) -> bool:
+        """Set the order_field value for a child record.
+
+        Args:
+            session_maker: SQLAlchemy session maker.
+            pk_str: PK of the child to reorder.
+            new_position: New integer position value (1-indexed).
+
+        Returns:
+            True if updated, False if not found or order_field not configured.
+        """
+        if cls.order_field is None:
+            return False
+
+        from sqladmin.helpers import is_async_session_maker
+
+        async def _do(session: Any) -> bool:
+            pk_vals = _parse_pk(pk_str, cls.pk_columns)
+            obj = await session.get(cls.model, pk_vals)
+            if obj is None:
+                return False
+            setattr(obj, cls.order_field, new_position)
             await session.commit()
             return True
 

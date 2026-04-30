@@ -4,7 +4,7 @@
 
 [![Coverage Status](https://img.shields.io/badge/%20Python%20Versions-%3E%3D3.10-informational)](https://github.com/Shchusia/sqladmin_inline)
 [![Coverage Status](https://coveralls.io/repos/github/Shchusia/sqladmin-inline/badge.svg?branch=feature/v0.0.1)](https://coveralls.io/github/Shchusia/sqladmin-inline?branch=feature/v0.0.1)
-[![Coverage Status](https://img.shields.io/badge/Version-0.0.3-informational)](https://pypi.org/project/sqladmin_inline/)
+[![Coverage Status](https://img.shields.io/badge/Version-0.0.4-informational)](https://pypi.org/project/sqladmin_inline/)
 
 ## Features
 

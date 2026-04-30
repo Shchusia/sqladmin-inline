@@ -45,6 +45,7 @@
                 pagination=ctx.pagination, search=ctx.search,
                 search_enabled=ctx.search_enabled, can_delete=ctx.can_delete,
                 can_create=ctx.can_create,can_edit=ctx.can_edit,
+                order_field=ctx.order_field,
                 form_class=ctx.form_class, parent_pk=ctx.parent_pk %}
           {% include "sqladmin_inline/_inline_table.html" %}
         {% endwith %}
@@ -86,7 +87,7 @@
                 pagination=ctx.pagination, search=ctx.search,
                 search_enabled=ctx.search_enabled, can_delete=ctx.can_delete,
                 can_create=ctx.can_create,can_edit=ctx.can_edit,
-
+                order_field=ctx.order_field,
                 form_class=ctx.form_class, parent_pk=ctx.parent_pk %}
           {% include "sqladmin_inline/_inline_table.html" %}
         {% endwith %}
@@ -119,7 +120,7 @@
               pagination=ctx.pagination, search=ctx.search,
               search_enabled=ctx.search_enabled, can_delete=ctx.can_delete,
                 can_create=ctx.can_create,can_edit=ctx.can_edit,
-
+              order_field=ctx.order_field,
               form_class=ctx.form_class, parent_pk=ctx.parent_pk %}
         {% include "sqladmin_inline/_inline_table.html" %}
       {% endwith %}

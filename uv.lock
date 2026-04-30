@@ -1298,7 +1298,7 @@ wheels = [
 
 [[package]]
 name = "sqladmin-inline"
-version = "0.0.3"
+version = "0.0.4"
 source = { virtual = "." }
 dependencies = [
     { name = "sqladmin" },

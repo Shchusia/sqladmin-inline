@@ -45,33 +45,112 @@
   </div>
 </div>
 
+{# SortableJS for drag-and-drop reordering #}
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Sortable/1.15.2/Sortable.min.js"></script>
+
 <script>
 (function ($) {
   "use strict";
 
   // -------------------------------------------------------------------------
-  // Reload an inline section via AJAX
+  // Load More state: tracks which pages are already loaded per inline
+  // -------------------------------------------------------------------------
+  var _loadedPages = {};   // { inlineId: [rows_html...] }
+  var _loadedCount = {};   // { inlineId: currently_shown_count }
+
+  // -------------------------------------------------------------------------
+  // Reload a section (replaces entire card)
   // -------------------------------------------------------------------------
   function reloadSection(inlineId, listUrl) {
     $.get(listUrl).done(function (html) {
       var $section = $("#inline-" + inlineId);
       if (!$section.length) return;
-      var $new = $(html).filter("#inline-" + inlineId);
-      if (!$new.length) {
-        // html might be the card itself without a wrapper
-        var $parsed = $("<div>").html(html);
-        $new = $parsed.find("#inline-" + inlineId);
-        if (!$new.length) $new = $parsed;
+      var $parsed = $("<div>").html(html);
+      var $new = $parsed.find("#inline-" + inlineId);
+      if (!$new.length) $new = $parsed;
+
+      // If loaded page is empty (no data rows) — fallback to page 1
+      if ($new.find("tbody tr[data-pk]").length === 0 && listUrl.indexOf("page=") !== -1 && listUrl.indexOf("page=1") === -1) {
+        var fallbackUrl = listUrl.replace(/page=\d+/, "page=1");
+        reloadSection(inlineId, fallbackUrl);
+        return;
       }
+
       $section.replaceWith($new);
+      delete _loadedPages[inlineId];
+      delete _loadedCount[inlineId];
       bindAll();
+      // Delay initSortable to let DOM settle and avoid stale reference issues
+      setTimeout(function () { initSortable(inlineId); }, 50);
     }).fail(function (xhr) {
       console.error("Inline reload failed:", xhr.responseText);
     });
   }
 
   // -------------------------------------------------------------------------
-  // Open the add/edit modal
+  // Load More: appends next page rows to existing tbody
+  // -------------------------------------------------------------------------
+  function loadMore(inlineId, nextPage, baseUrl, search, pageSize, totalCount) {
+    var url = baseUrl + "?page=" + nextPage + "&search=" + encodeURIComponent(search || "");
+    var $btn = $(".inline-load-more[data-inline='" + inlineId + "']");
+    $btn.prop("disabled", true).html('<i class="fa fa-spinner fa-spin mr-1"></i>Loading…');
+
+    $.get(url).done(function (html) {
+      var $parsed = $("<div>").html(html);
+      // Extract only data rows (skip empty-state row)
+      var $newRows = $parsed.find("#inline-" + inlineId + " tbody tr[data-pk]");
+      var $newBtn  = $parsed.find(".inline-load-more");
+      var $tbody   = $("#inline-" + inlineId + " tbody");
+      var isSortable = $("#inline-sortable-" + inlineId).length > 0;
+
+      // If sortable: inject drag handle cell into each new row before inserting
+      if (isSortable) {
+        $newRows.each(function () {
+          var $tr = $(this);
+          // Only add if not already there
+          if (!$tr.find(".inline-drag-handle").length) {
+            $tr.prepend(
+              '<td class="pr-0 inline-drag-handle" style="cursor:grab;color:#aaa;width:32px">'
+              + '<i class="fa fa-grip-vertical"></i></td>'
+            );
+          }
+        });
+      }
+
+      // Append new rows
+      $tbody.append($newRows);
+
+      // Update count text
+      var currentShown = $tbody.find("tr[data-pk]").length;
+      $("#inline-count-" + inlineId).text(
+        "Showing 1–" + currentShown + " of " + totalCount
+      );
+
+      // Hide pagination when all rows are now shown
+      if (currentShown >= totalCount) {
+        $(".inline-pagination[data-inline='" + inlineId + "']").hide();
+      }
+
+      // Update or remove Load More button
+      if ($newBtn.length) {
+        $(".inline-load-more[data-inline='" + inlineId + "']").replaceWith($newBtn);
+        bindLoadMore();
+      } else {
+        $(".inline-load-more[data-inline='" + inlineId + "']").remove();
+      }
+
+      bindAll();
+      initSortable(inlineId);  // re-init so new rows are draggable
+    }).fail(function (xhr) {
+      console.error("Load more failed:", xhr.responseText);
+      $btn.prop("disabled", false).html(
+        '<i class="fa fa-chevron-down mr-1"></i>Load more'
+      );
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // Modal helpers
   // -------------------------------------------------------------------------
   var _currentInlineId = "";
   var _currentListUrl  = "";
@@ -93,20 +172,13 @@
       );
     });
   }
-    // -------------------------------------------------------------------------
-  // Close modal handlers
-  // -------------------------------------------------------------------------
-  $(document).on("click", "#inline-modal .close", function () {
+
+  $(document).on("click", "#inline-modal .close, #inline-modal .btn-secondary", function () {
     $("#inline-modal").modal("hide");
   });
 
-  $(document).on("click", "#inline-modal .btn-secondary", function () {
-    $("#inline-modal").modal("hide");
-  });
-
-
   // -------------------------------------------------------------------------
-  // Save button inside modal
+  // Save
   // -------------------------------------------------------------------------
   $(document).on("click", "#inline-modal-save", function () {
     var $form = $("#inline-modal-form");
@@ -120,21 +192,22 @@
     $("#inline-modal-save").prop("disabled", true);
 
     $.ajax({
-      url:         saveUrl,
-      method:      "POST",
-      data:        new FormData($form[0]),
-      processData: false,
-      contentType: false,
+      url: saveUrl, method: "POST",
+      data: new FormData($form[0]),
+      processData: false, contentType: false,
     }).done(function (resp) {
       if (resp && resp.ok) {
+        var _reloadInlineId = inlineId;
+        var _reloadUrl = listUrl || _currentListUrl;
+        $("#inline-modal").one("hidden.bs.modal", function () {
+          reloadSection(_reloadInlineId, _reloadUrl);
+        });
         $("#inline-modal").modal("hide");
-        reloadSection(inlineId, listUrl || _currentListUrl);
       } else {
         alert("Error: " + JSON.stringify(resp));
       }
     }).fail(function (xhr) {
       if (xhr.status === 422) {
-        // Validation errors — server returns rendered form HTML
         $("#inline-modal-body").html(xhr.responseText);
       } else {
         alert("Save failed: " + (xhr.responseJSON && xhr.responseJSON.error || xhr.responseText));
@@ -146,148 +219,200 @@
   });
 
   // -------------------------------------------------------------------------
-  // Pending delete state
+  // Delete
   // -------------------------------------------------------------------------
   var _pendingDelete = { url: "", listUrl: "", pks: [], inlineId: "" };
 
   $(document).on("click", "#inline-delete-confirm", function () {
-    var $spinner = $("#inline-delete-spinner");
-    var $btn     = $(this);
-    $spinner.removeClass("d-none");
-    $btn.prop("disabled", true);
-
+    var $spinner = $("#inline-delete-spinner"), $btn = $(this);
+    $spinner.removeClass("d-none"); $btn.prop("disabled", true);
     $.ajax({
-      url:         _pendingDelete.url,
-      method:      "DELETE",
+      url: _pendingDelete.url, method: "DELETE",
       contentType: "application/json",
-      data:        JSON.stringify({ pks: _pendingDelete.pks }),
-    }).done(function () {
+      data: JSON.stringify({ pks: _pendingDelete.pks }),
+    }).done(function (resp) {
+      var _delInlineId = _pendingDelete.inlineId;
+      var _delBase     = _pendingDelete.listUrl.split("?")[0];
+      var _delSearch   = _pendingDelete.search || "";
+      $("#inline-delete-modal").one("hidden.bs.modal", function () {
+        reloadSection(_delInlineId, _delBase + "?page=1&search=" + encodeURIComponent(_delSearch));
+      });
       $("#inline-delete-modal").modal("hide");
-      reloadSection(_pendingDelete.inlineId, _pendingDelete.listUrl);
     }).fail(function (xhr) {
       alert("Delete failed: " + (xhr.responseJSON && xhr.responseJSON.error || xhr.responseText));
     }).always(function () {
-      $spinner.addClass("d-none");
-      $btn.prop("disabled", false);
+      $spinner.addClass("d-none"); $btn.prop("disabled", false);
     });
   });
 
   // -------------------------------------------------------------------------
-  // Event binding (called after every section reload)
+  // Drag-and-drop reordering via SortableJS
   // -------------------------------------------------------------------------
-  function bindAll() {
+  var _sortableInstances = {};
 
-    // ── Add button ──────────────────────────────────────────────────────────
-    $(".inline-add-btn").off("click.inline").on("click.inline", function () {
-      var $btn     = $(this);
-      var inlineId = $btn.data("inline");
-      var formUrl  = $btn.data("form-url");
-      var label    = $btn.data("label");
-      var listUrl  = formUrl.replace(/\/form.*$/, "/list");
-      openModal("Add " + label, formUrl, inlineId, listUrl);
-    });
+  function initSortable(inlineId) {
+    var $table = $("#inline-sortable-" + inlineId);
+    if (!$table.length) return;
 
-    // ── Edit button ─────────────────────────────────────────────────────────
-    $(".inline-edit-btn").off("click.inline").on("click.inline", function (e) {
-      e.preventDefault();
-      var $a       = $(this);
-      var inlineId = $a.data("inline");
-      var formUrl  = $a.data("form-url");
-      var label    = $a.data("label");
-      var listUrl  = formUrl.split("?")[0].replace(/\/form$/, "/list");
-      openModal("Edit " + label, formUrl, inlineId, listUrl);
-    });
+    var reorderUrl = $table.data("reorder-url");
+    if (!reorderUrl) return;
 
-    // ── Pagination ──────────────────────────────────────────────────────────
-    $(".inline-page-link").off("click.inline").on("click.inline", function (e) {
-      e.preventDefault();
-      var $a       = $(this);
-      var inlineId = $a.data("inline");
-      var url      = $a.data("url");
-      reloadSection(inlineId, url);
-    });
+    // Destroy previous instance safely
+    if (_sortableInstances[inlineId]) {
+      try { _sortableInstances[inlineId].destroy(); } catch (e) {}
+      _sortableInstances[inlineId] = null;
+    }
 
-    // ── Search button ───────────────────────────────────────────────────────
-    $(".inline-search-btn").off("click.inline").on("click.inline", function () {
-      var inlineId = $(this).data("inline");
-      submitSearch(inlineId);
-    });
+    var tbody = document.getElementById("inline-tbody-" + inlineId);
+    if (!tbody) return;
 
-    // ── Search input Enter key ──────────────────────────────────────────────
-    $(".inline-search-input").off("keydown.inline").on("keydown.inline", function (e) {
-      if (e.which === 13) {
-        e.preventDefault();
-        submitSearch($(this).data("inline"));
+    _sortableInstances[inlineId] = Sortable.create(tbody, {
+      handle: ".inline-drag-handle",
+      animation: 150,
+      ghostClass: "table-active",
+      onEnd: function (evt) {
+        // Collect all PKs in new order
+        var pks = [];
+        $(tbody).find("tr[data-pk]").each(function () {
+          pks.push($(this).data("pk"));
+        });
+
+        // Send to server
+        $.ajax({
+          url: reorderUrl,
+          method: "POST",
+          contentType: "application/json",
+          data: JSON.stringify({ pks: pks }),
+        }).done(function () {
+          // Update visual order numbers if visible
+          $(tbody).find("tr[data-pk]").each(function (i) {
+            $(this).find("td:nth-child(2)").filter(function () {
+              return $(this).hasClass("text-center") && $(this).hasClass("text-muted");
+            }).text(i + 1);
+          });
+        }).fail(function (xhr) {
+          console.error("Reorder failed:", xhr.responseText);
+          // Reload to restore correct order
+          reloadSection(inlineId, "/admin/" + reorderUrl.split("/admin/")[1].split("/reorder")[0] + "/list");
+        });
       }
     });
+  }
 
-    // ── Search clear ────────────────────────────────────────────────────────
+  function initAllSortables() {
+    $("[id^='inline-sortable-']").each(function () {
+      var inlineId = this.id.replace("inline-sortable-", "");
+      initSortable(inlineId);
+    });
+  }
+
+  // -------------------------------------------------------------------------
+  // Event binding
+  // -------------------------------------------------------------------------
+  function bindLoadMore() {
+    $(".inline-load-more").off("click.loadmore").on("click.loadmore", function () {
+      var $btn       = $(this);
+      var iid        = $btn.data("inline");
+      var nextPg     = parseInt($btn.data("next-page"), 10);
+      var baseUrl    = $btn.data("base-url");
+      var search     = $btn.data("search") || "";
+      var pgSize     = $btn.data("page-size");
+      var totalCount = parseInt($btn.data("total"), 10);
+      loadMore(iid, nextPg, baseUrl, search, pgSize, totalCount);
+    });
+  }
+
+  function bindAll() {
+    // Add
+    $(".inline-add-btn").off("click.inline").on("click.inline", function () {
+      var $btn = $(this);
+      var iid  = $btn.data("inline");
+      var formUrl = $btn.data("form-url");
+      var listUrl = formUrl.replace(/\/form.*$/, "/list");
+      openModal("Add " + $btn.data("label"), formUrl, iid, listUrl);
+    });
+
+    // Edit
+    $(".inline-edit-btn").off("click.inline").on("click.inline", function (e) {
+      e.preventDefault();
+      var $a = $(this), iid = $a.data("inline");
+      var formUrl = $a.data("form-url");
+      var listUrl = formUrl.split("?")[0].replace(/\/form$/, "/list");
+      openModal("Edit " + $a.data("label"), formUrl, iid, listUrl);
+    });
+
+    // Pagination
+    $(".inline-page-link").off("click.inline").on("click.inline", function (e) {
+      e.preventDefault();
+      var $a = $(this);
+      reloadSection($a.data("inline"), $a.data("url"));
+    });
+
+    // Search
+    $(".inline-search-btn").off("click.inline").on("click.inline", function () {
+      submitSearch($(this).data("inline"));
+    });
+    $(".inline-search-input").off("keydown.inline").on("keydown.inline", function (e) {
+      if (e.which === 13) { e.preventDefault(); submitSearch($(this).data("inline")); }
+    });
     $(".inline-search-clear").off("click.inline").on("click.inline", function () {
-      var inlineId = $(this).data("inline");
-      var baseUrl  = $(this).data("base-url");
-      reloadSection(inlineId, baseUrl + "?search=&page=1");
+      reloadSection($(this).data("inline"), $(this).data("base-url") + "?search=&page=1");
     });
 
-    // ── Select all ──────────────────────────────────────────────────────────
+    // Select all / checkboxes
     $(".inline-select-all").off("change.inline").on("change.inline", function () {
-      var inlineId = $(this).data("inline");
-      var checked  = this.checked;
-      $(".inline-select-box[data-inline='" + inlineId + "']").prop("checked", checked);
-      updateBulkBtn(inlineId);
+      var iid = $(this).data("inline"), checked = this.checked;
+      $(".inline-select-box[data-inline='" + iid + "']").prop("checked", checked);
+      updateBulkBtn(iid);
     });
-
-    // ── Individual checkboxes ────────────────────────────────────────────────
     $(".inline-select-box").off("change.inline").on("change.inline", function () {
       updateBulkBtn($(this).data("inline"));
     });
 
-    // ── Bulk delete button ───────────────────────────────────────────────────
+    // Bulk delete
     $(".inline-bulk-delete").off("click.inline").on("click.inline", function () {
-      var $btn     = $(this);
-      var inlineId = $btn.data("inline");
-      var pks = $(".inline-select-box[data-inline='" + inlineId + "']:checked")
-                  .map(function () { return $(this).data("pk"); })
-                  .get();
+      var $btn = $(this), iid = $btn.data("inline");
+      var pks = $(".inline-select-box[data-inline='" + iid + "']:checked")
+                  .map(function () { return $(this).data("pk"); }).get();
       if (!pks.length) return;
+      var $searchInput = $(".inline-search-input[data-inline='" + iid + "']");
       _pendingDelete = {
         url:      $btn.data("delete-url"),
         listUrl:  $btn.data("list-url"),
         pks:      pks,
-        inlineId: inlineId,
+        inlineId: iid,
+        search:   $searchInput.length ? $searchInput.val() : "",
       };
-      $("#inline-delete-text").text(
-        "This will permanently delete " + pks.length + " item(s)."
-      );
+      $("#inline-delete-text").text("This will permanently delete " + pks.length + " item(s).");
       $("#inline-delete-modal").modal("show");
     });
+
+    // Load More
+    bindLoadMore();
   }
 
-  function submitSearch(inlineId) {
-    var $input  = $(".inline-search-input[data-inline='" + inlineId + "']");
-    var baseUrl = $input.data("base-url");
-    var term    = encodeURIComponent($input.val().trim());
-    reloadSection(inlineId, baseUrl + "?search=" + term + "&page=1");
+  function submitSearch(iid) {
+    var $input = $(".inline-search-input[data-inline='" + iid + "']");
+    var term = encodeURIComponent($input.val().trim());
+    reloadSection(iid, $input.data("base-url") + "?search=" + term + "&page=1");
   }
 
-  function updateBulkBtn(inlineId) {
-    var count = $(".inline-select-box[data-inline='" + inlineId + "']:checked").length;
-    var $btn  = $(".inline-bulk-delete[data-inline='" + inlineId + "']");
-    $btn.toggleClass("d-none", count === 0);
+  function updateBulkBtn(iid) {
+    var count = $(".inline-select-box[data-inline='" + iid + "']:checked").length;
+    $(".inline-bulk-delete[data-inline='" + iid + "']").toggleClass("d-none", count === 0);
   }
 
-  // ── Collapse icon rotation ────────────────────────────────────────────────
-  $(document).on('show.bs.collapse', '.inline-section .collapse', function () {
-    var iid = this.id.replace('inline-body-', '');
-    $('#inline-icon-' + iid).css('transform', 'rotate(0deg)');
+  // Collapse icons
+  $(document).on("show.bs.collapse", ".inline-section .collapse", function () {
+    $("#inline-icon-" + this.id.replace("inline-body-", "")).css("transform", "rotate(0deg)");
   });
-  $(document).on('hide.bs.collapse', '.inline-section .collapse', function () {
-    var iid = this.id.replace('inline-body-', '');
-    $('#inline-icon-' + iid).css('transform', 'rotate(-90deg)');
+  $(document).on("hide.bs.collapse", ".inline-section .collapse", function () {
+    $("#inline-icon-" + this.id.replace("inline-body-", "")).css("transform", "rotate(-90deg)");
   });
 
-  // Initial bind on DOM ready
   $(document).ready(function () {
     bindAll();
+    initAllSortables();
   });
 
 }(jQuery));

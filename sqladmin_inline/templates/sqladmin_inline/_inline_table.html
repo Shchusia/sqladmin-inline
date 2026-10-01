@@ -1,231 +1,172 @@
-{% set il = inline_cls %}
-{% set iid = identity %}
-{% set pp = parent_pk %}
-{% set base_url = "/admin/" ~ parent_identity ~ "/inline/" ~ iid ~ "/" ~ pp %}
-{% set sortable = (order_field is defined and order_field) %}
+{#- One inline section (a card). Rendered inside the edit page and returned
+    alone by the ".../list" endpoint, so it only depends on `ctx`. -#}
+{%- set iid = ctx.identity -%}
+{%- set p = ctx.pagination -%}
+{%- set il = ctx.inline_cls -%}
+{%- set list_url = ctx.base_url ~ "/list" -%}
+{%- set current_url = list_url ~ "?page=" ~ p.page ~ "&search=" ~ (ctx.search | urlencode) -%}
+{%- set extra_cols = (1 if ctx.sortable else 0) + (1 if ctx.can_delete else 0) + (1 if ctx.can_edit else 0) -%}
+<div class="card inline-section"
+     id="inline-{{ iid }}"
+     data-inline="{{ iid }}"
+     data-base-url="{{ ctx.base_url }}"
+     data-current-url="{{ current_url }}"
+     data-label="{{ ctx.label }}">
 
-<div class="inline-section card mt-3" id="inline-{{ iid }}">
-
-  {# ── Header ── #}
-  <div class="card-header"
-       style="cursor:pointer; user-select:none;"
-       data-toggle="collapse"
-       data-target="#inline-body-{{ iid }}"
+  <div class="card-header inline-header"
+       role="button"
+       tabindex="0"
+       aria-controls="inline-body-{{ iid }}"
        aria-expanded="true">
-    <div class="d-flex align-items-center w-100" style="gap:10px">
-
-      <i class="fa fa-chevron-down inline-collapse-icon text-muted"
-         id="inline-icon-{{ iid }}"
-         style="transition: transform 0.2s; font-size:12px; flex-shrink:0"></i>
-
-      <h4 class="card-title mb-0 flex-grow-1">
-        {% if icon %}<i class="{{ icon }} mr-1 text-muted"></i>{% endif %}
-        {{ label }}
-        <span class="badge badge-secondary ml-2" style="font-size:11px">{{ pagination.count }}</span>
-        {% if sortable %}
-          <span class="badge badge-info ml-1" style="font-size:10px" title="Drag rows to reorder">
-            <i class="fa fa-sort"></i> sortable
-          </span>
-        {% endif %}
-      </h4>
-
-      {# Search #}
-      {% if search_enabled %}
-      <div class="d-flex align-items-center" style="gap:6px" onclick="event.stopPropagation()">
-        <div class="input-group input-group-sm" style="width:200px">
-          <input type="text"
-                 class="form-control inline-search-input"
-                 placeholder="Search…"
-                 value="{{ search }}"
-                 data-inline="{{ iid }}"
-                 data-base-url="{{ base_url }}/list">
-          <div class="input-group-append">
-            <button class="btn btn-sm btn-light inline-search-btn" type="button" data-inline="{{ iid }}">
-              <i class="fa fa-search"></i>
-            </button>
-            {% if search %}
-            <button class="btn btn-sm btn-light inline-search-clear" type="button"
-                    data-inline="{{ iid }}" data-base-url="{{ base_url }}/list">
-              <i class="fa fa-times"></i>
-            </button>
-            {% endif %}
-          </div>
-        </div>
-      </div>
+    <i class="fa-solid fa-chevron-down inline-collapse-icon text-muted me-2"></i>
+    <h3 class="card-title mb-0 d-flex align-items-center flex-grow-1">
+      {% if ctx.icon %}<i class="{{ ctx.icon }} me-2 text-muted"></i>{% endif %}
+      {{ ctx.label }}
+      <span class="badge bg-secondary-lt ms-2" data-inline-count>{{ p.count }}</span>
+      {% if ctx.sortable %}
+      <span class="badge bg-azure-lt ms-1" title="Drag rows to reorder">
+        <i class="fa-solid fa-sort"></i> sortable
+      </span>
       {% endif %}
+    </h3>
 
-      {# Add button #}
-      {% if can_create %}
-      <div onclick="event.stopPropagation()">
-        <button type="button"
-                class="btn btn-sm btn-primary inline-add-btn"
-                data-inline="{{ iid }}"
-                data-form-url="{{ base_url }}/form"
-                data-list-url="{{ base_url }}/list"
-                data-label="{{ label }}">
-          <i class="fa fa-plus mr-1"></i>Add
+    <div class="card-actions d-flex align-items-center gap-2 inline-no-toggle">
+      {% if ctx.search_enabled %}
+      <div class="input-group input-group-sm inline-search">
+        <input type="search"
+               class="form-control inline-search-input"
+               placeholder="Search…"
+               aria-label="Search {{ ctx.label }}"
+               value="{{ ctx.search }}">
+        <button class="btn btn-sm inline-search-btn" type="button" title="Search">
+          <i class="fa-solid fa-magnifying-glass"></i>
         </button>
+        {% if ctx.search %}
+        <button class="btn btn-sm inline-search-clear" type="button" title="Clear search">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+        {% endif %}
       </div>
       {% endif %}
 
+      {% if ctx.can_create %}
+      <button type="button" class="btn btn-sm btn-primary inline-add-btn"
+              data-form-url="{{ ctx.base_url }}/form">
+        <i class="fa-solid fa-plus me-1"></i>Add
+      </button>
+      {% endif %}
     </div>
   </div>
 
-  {# ── Body ── #}
   <div class="collapse show" id="inline-body-{{ iid }}">
+    <div class="inline-alerts"></div>
     <div class="table-responsive">
-      <table class="table table-vcenter card-table mb-0"
-             {% if sortable %}
-             id="inline-sortable-{{ iid }}"
-             data-inline="{{ iid }}"
-             data-reorder-url="/admin/{{ parent_identity }}/inline/{{ iid }}/reorder"
-             {% endif %}>
+      <table class="table table-vcenter card-table mb-0 inline-table"
+             {% if ctx.sortable %}data-reorder-url="{{ ctx.base_url }}/reorder"{% endif %}>
         <thead>
           <tr>
-            {# Drag handle column header #}
-            {% if sortable %}
-            <th class="w-1 pr-0" title="Drag to reorder" style="width:32px">
-              <i class="fa fa-grip-vertical text-muted" style="font-size:11px"></i>
+            {% if ctx.sortable %}<th class="w-1"></th>{% endif %}
+            {% if ctx.can_delete %}
+            <th class="w-1">
+              <input class="form-check-input m-0 align-middle inline-select-all" type="checkbox"
+                     aria-label="Select all">
             </th>
             {% endif %}
-            {# Delete checkbox column header — independent from sortable #}
-            {% if can_delete %}
-            <th class="w-1 pr-0" style="width:32px">
-              <input class="form-check-input m-0 inline-select-all" type="checkbox"
-                     data-inline="{{ iid }}">
-            </th>
-            {% endif %}
-            {% for col in display_columns %}
-            <th>{{ column_labels[col] }}</th>
+            {% for col in ctx.display_columns %}
+            <th>{{ ctx.column_labels[col] }}</th>
             {% endfor %}
-            <th class="w-1"></th>
+            {% if ctx.can_edit %}<th class="w-1"></th>{% endif %}
           </tr>
         </thead>
-        <tbody {% if sortable %}id="inline-tbody-{{ iid }}"{% endif %}>
-          {% if pagination.rows %}
-            {% for row in pagination.rows %}
-            {% set row_pk = il.encode_pk(row) %}
-            <tr data-pk="{{ row_pk }}">
-              {# Drag handle cell #}
-              {% if sortable %}
-              <td class="pr-0 inline-drag-handle" style="cursor:grab; color:#aaa; width:32px">
-                <i class="fa fa-grip-vertical"></i>
-              </td>
-              {% endif %}
-              {# Delete checkbox cell #}
-              {% if can_delete %}
-              <td class="pr-0" style="width:32px">
-                <input class="form-check-input m-0 inline-select-box" type="checkbox"
-                       data-inline="{{ iid }}" data-pk="{{ row_pk }}">
-              </td>
-              {% endif %}
-              {% for col in display_columns %}
-              <td>{{ il.get_display_value(row, col) }}</td>
-              {% endfor %}
-              <td class="text-right">
-                {% if can_edit %}
-                <a href="#"
-                   class="text-muted inline-edit-btn"
-                   data-inline="{{ iid }}"
-                   data-pk="{{ row_pk }}"
-                   data-form-url="{{ base_url }}/form?pk={{ row_pk }}"
-                   data-list-url="{{ base_url }}/list"
-                   data-label="{{ label }}"
-                   title="Edit">
-                  <i class="fa fa-pencil"></i>
-                </a>
-                {% endif %}
-              </td>
-            </tr>
+        <tbody>
+          {% for row in p.rows %}
+          {% set row_pk = il.encode_pk(row) %}
+          <tr data-pk="{{ row_pk }}">
+            {% if ctx.sortable %}
+            <td class="inline-drag-handle text-muted" title="Drag to reorder">
+              <i class="fa-solid fa-grip-vertical"></i>
+            </td>
+            {% endif %}
+            {% if ctx.can_delete %}
+            <td>
+              <input class="form-check-input m-0 align-middle inline-select-box" type="checkbox"
+                     value="{{ row_pk }}" aria-label="Select row">
+            </td>
+            {% endif %}
+            {% for col in ctx.display_columns %}
+            <td>{{ il.get_display_value(row, col) }}</td>
             {% endfor %}
+            {% if ctx.can_edit %}
+            <td class="text-end">
+              <button type="button" class="btn btn-sm btn-ghost-secondary btn-icon inline-edit-btn"
+                      data-form-url="{{ ctx.base_url }}/form?pk={{ row_pk | urlencode }}"
+                      title="Edit">
+                <i class="fa-solid fa-pen"></i>
+              </button>
+            </td>
+            {% endif %}
+          </tr>
           {% else %}
-          <tr>
-            <td colspan="{{ display_columns|length + (1 if sortable else 0) + (1 if can_delete else 0) + 1 }}"
-                class="text-center text-muted py-4">
-              {% if search %}
-                No results for "<strong>{{ search }}</strong>"
+          <tr class="inline-empty">
+            <td colspan="{{ ctx.display_columns | length + extra_cols }}" class="text-center text-muted py-4">
+              {% if ctx.search %}
+              No results for “<strong>{{ ctx.search }}</strong>”
               {% else %}
-                No {{ label }} yet{% if can_create %} — click <strong>Add</strong> to create one{% endif %}.
+              No {{ ctx.label }} yet{% if ctx.can_create %} — click <strong>Add</strong> to create one{% endif %}.
               {% endif %}
             </td>
           </tr>
-          {% endif %}
+          {% endfor %}
         </tbody>
       </table>
     </div>
 
-    {# ── Footer ── #}
-    {% if can_delete or pagination.total_pages > 1 or pagination.count > 0 %}
-    <div class="card-footer d-flex align-items-center flex-wrap" style="gap:10px; min-height:48px">
-
-      {% if can_delete %}
-      <button type="button"
-              class="btn btn-sm btn-danger inline-bulk-delete d-none"
-              data-inline="{{ iid }}"
-              data-delete-url="{{ base_url }}/delete"
-              data-list-url="{{ base_url }}/list?page={{ pagination.page }}&search={{ search }}">
-        <i class="fa fa-trash mr-1"></i>Delete selected
+    <div class="card-footer d-flex align-items-center flex-wrap gap-2">
+      {% if ctx.can_delete %}
+      <button type="button" class="btn btn-sm btn-danger inline-bulk-delete d-none"
+              data-delete-url="{{ ctx.base_url }}/delete">
+        <i class="fa-solid fa-trash me-1"></i>Delete selected
       </button>
       {% endif %}
 
-      <span class="text-muted small" id="inline-count-{{ iid }}">
-        {% if pagination.count > 0 %}
-          Showing {{ (pagination.page - 1) * pagination.page_size + 1 }}–{{ [pagination.page * pagination.page_size, pagination.count] | min }}
-          of {{ pagination.count }}
-        {% else %}
-          0 items
-        {% endif %}
+      <span class="text-muted small inline-range">
+        {% if p.count %}Showing {{ p.first_index }}–{{ p.last_index }} of {{ p.count }}{% else %}0 items{% endif %}
       </span>
 
-      {# Pagination — hidden when load-more has loaded everything #}
-      {% if pagination.total_pages > 1 %}
-      <ul class="pagination pagination-sm m-0 ml-auto inline-pagination" data-inline="{{ iid }}">
-        <li class="page-item {{ 'disabled' if not pagination.has_previous }}">
-          <a class="page-link inline-page-link" href="#"
-             data-inline="{{ iid }}"
-             data-url="{{ base_url }}/list?page={{ pagination.page - 1 }}&search={{ search }}">
-            <i class="fa fa-chevron-left"></i>
+      {% if p.total_pages > 1 %}
+      <ul class="pagination pagination-sm m-0 ms-auto inline-pagination">
+        <li class="page-item {{ 'disabled' if not p.has_previous }}">
+          <a class="page-link inline-page-link" href="#" aria-label="Previous"
+             data-url="{{ list_url }}?page={{ p.page - 1 }}&search={{ ctx.search | urlencode }}">
+            <i class="fa-solid fa-chevron-left"></i>
           </a>
         </li>
-        {% for p in pagination.page_range %}
-          {% if p is none %}
-          <li class="page-item disabled"><span class="page-link">…</span></li>
-          {% else %}
-          <li class="page-item {{ 'active' if p == pagination.page }}">
-            <a class="page-link inline-page-link" href="#"
-               data-inline="{{ iid }}"
-               data-url="{{ base_url }}/list?page={{ p }}&search={{ search }}">{{ p }}</a>
-          </li>
-          {% endif %}
-        {% endfor %}
-        <li class="page-item {{ 'disabled' if not pagination.has_next }}">
+        {% for n in p.page_range %}
+        {% if n is none %}
+        <li class="page-item disabled"><span class="page-link">…</span></li>
+        {% else %}
+        <li class="page-item {{ 'active' if n == p.page }}">
           <a class="page-link inline-page-link" href="#"
-             data-inline="{{ iid }}"
-             data-url="{{ base_url }}/list?page={{ pagination.page + 1 }}&search={{ search }}">
-            <i class="fa fa-chevron-right"></i>
+             data-url="{{ list_url }}?page={{ n }}&search={{ ctx.search | urlencode }}">{{ n }}</a>
+        </li>
+        {% endif %}
+        {% endfor %}
+        <li class="page-item {{ 'disabled' if not p.has_next }}">
+          <a class="page-link inline-page-link" href="#" aria-label="Next"
+             data-url="{{ list_url }}?page={{ p.page + 1 }}&search={{ ctx.search | urlencode }}">
+            <i class="fa-solid fa-chevron-right"></i>
           </a>
         </li>
       </ul>
       {% endif %}
 
-      {# Load More — shown when more pages exist #}
-      {% if pagination.has_next %}
-      <button type="button"
-              class="btn btn-sm btn-outline-secondary inline-load-more"
-              data-inline="{{ iid }}"
-              data-next-page="{{ pagination.page + 1 }}"
-              data-base-url="{{ base_url }}/list"
-              data-search="{{ search }}"
-              data-page-size="{{ pagination.page_size }}"
-              data-total="{{ pagination.count }}"
-              style="margin-left:{{ 'auto' if pagination.total_pages <= 1 else '0' }}">
-        <i class="fa fa-chevron-down mr-1"></i>Load more
-        <span class="text-muted">({{ pagination.count - pagination.page * pagination.page_size }} more)</span>
+      {% if p.has_next %}
+      <button type="button" class="btn btn-sm btn-outline-secondary inline-load-more {{ '' if p.total_pages > 1 else 'ms-auto' }}"
+              data-url="{{ list_url }}?page={{ p.page + 1 }}&search={{ ctx.search | urlencode }}">
+        <i class="fa-solid fa-chevron-down me-1"></i>Load more
+        <span class="text-muted ms-1">({{ p.remaining }} more)</span>
       </button>
       {% endif %}
-
     </div>
-    {% endif %}
-
   </div>
 </div>

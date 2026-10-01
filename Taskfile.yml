@@ -21,7 +21,7 @@ tasks:
   test:
     desc: Run tests
     cmds:
-      - coverage run -m pytest tests -s --cov=sqladmin_inline  --cov-branch --cov-report=term-missing -o log_cli=true
+      - pytest tests --cov=sqladmin_inline --cov-branch --cov-report=term-missing -o log_cli=true
     silent: true
 
   publishtest:
@@ -29,7 +29,6 @@ tasks:
     desc: Run tests and publish results to https://coveralls.io/
     cmds:
       - uv run pytest tests --cov=sqladmin_inline --cov-branch --cov-report=term-missing --cov-report=xml -o log_cli=true
-      - coverage xml
       - coveralls
 
 
@@ -41,7 +40,13 @@ tasks:
   sync:
     desc: "Sync libraries"
     cmds:
-      - uv sync -U --group demo --group tests --group lint --group demo --active --inexact
+      - uv sync -U --group demo --group tests --group lint --active --inexact
+
+  e2e:
+    desc: Headless browser test (node + jsdom), external network blocked
+    cmds:
+      - cd tests/e2e && npm install --silent
+      - pytest tests/test_e2e_browser.py -o log_cli=true
 
   demo:
     desc: "Run Demo"
@@ -58,3 +63,58 @@ tasks:
     desc: Publish the compiled library
     cmds:
       - uv publish
+
+  release:
+    desc: "Bump version, build and publish. Usage: task release [type=patch|minor|major] (default: patch)"
+    silent: true
+    vars:
+      BUMP_TYPE: '{{.type | default "patch"}}'
+      PYPROJECT: "pyproject.toml"
+    cmds:
+      - |
+        # Validate type
+        if [ "{{.BUMP_TYPE}}" != "patch" ] && [ "{{.BUMP_TYPE}}" != "minor" ] && [ "{{.BUMP_TYPE}}" != "major" ]; then
+          echo "[ERROR] Invalid type '{{.BUMP_TYPE}}'. Use: patch, minor or major"
+          exit 1
+        fi
+
+        # Extract current version from pyproject.toml
+        CURRENT=$(grep '^version' {{.PYPROJECT}} | head -1 | sed 's/version *= *"\(.*\)"/\1/')
+        if [ -z "$CURRENT" ]; then
+          echo "[ERROR] Could not find version in {{.PYPROJECT}}"
+          exit 1
+        fi
+
+        MAJOR=$(echo "$CURRENT" | cut -d. -f1)
+        MINOR=$(echo "$CURRENT" | cut -d. -f2)
+        PATCH=$(echo "$CURRENT" | cut -d. -f3)
+
+        if [ "{{.BUMP_TYPE}}" = "major" ]; then
+          MAJOR=$((MAJOR + 1))
+          MINOR=0
+          PATCH=0
+        elif [ "{{.BUMP_TYPE}}" = "minor" ]; then
+          MINOR=$((MINOR + 1))
+          PATCH=0
+        else
+          PATCH=$((PATCH + 1))
+        fi
+
+        NEW_VERSION="${MAJOR}.${MINOR}.${PATCH}"
+
+        echo ">>> Bumping version: ${CURRENT} → ${NEW_VERSION} ({{.BUMP_TYPE}})"
+
+        # Replace version in pyproject.toml (only first occurrence — the package version)
+        sed -i "0,/^version = \"${CURRENT}\"/s//version = \"${NEW_VERSION}\"/" {{.PYPROJECT}}
+
+        # Verify
+        UPDATED=$(grep '^version' {{.PYPROJECT}} | head -1 | sed 's/version *= *"\(.*\)"/\1/')
+        if [ "$UPDATED" != "$NEW_VERSION" ]; then
+          echo "[ERROR] Version update failed. Check {{.PYPROJECT}} manually."
+          exit 1
+        fi
+
+        echo "[OK] Version updated to ${NEW_VERSION}"
+
+      - task: build
+      - task: publish

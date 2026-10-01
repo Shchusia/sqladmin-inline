@@ -1,32 +1,35 @@
-"""
-tests/conftest.py
-~~~~~~~~~~~~~~~~~
+"""Shared fixtures.
 
-Shared fixtures for sqladmin-inlines test suite.
-
-All tests use in-memory SQLite via aiosqlite.
-The `app` fixture spins up a full FastAPI + sqladmin stack
-with inline routes registered, so HTTP-level tests are realistic.
+Every test gets its own SQLite file, so tests are fully isolated.  Fixtures
+that touch the database are parametrized over an *async* and a *sync*
+session maker: the library must behave identically with both.
 """
 
 from __future__ import annotations
 
-from typing import AsyncGenerator, List, Optional
+from collections.abc import AsyncIterator, Callable, Iterator
+import dataclasses
+from typing import Any
 
-import pytest
-import pytest_asyncio
 from fastapi import FastAPI
-from sqlalchemy import ForeignKey, Integer, String, Text
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
-from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
-from starlette.testclient import TestClient
-
+import httpx
+import pytest
 from sqladmin import Admin, ModelView
+from sqlalchemy import ForeignKey, Integer, String, Text, create_engine, select
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlalchemy.orm import (
+    DeclarativeBase,
+    Mapped,
+    Session,
+    mapped_column,
+    relationship,
+    sessionmaker,
+)
+
 from sqladmin_inline import InlineModelAdmin, ModelViewWithInlines, setup_inline_routes
 
-
 # ---------------------------------------------------------------------------
-# SQLAlchemy models (used across all test modules)
+# Models
 # ---------------------------------------------------------------------------
 
 
@@ -35,14 +38,12 @@ class Base(DeclarativeBase):
 
 
 class User(Base):
-    """FK target — used to test relationship select fields in inlines."""
-
     __tablename__ = "users"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(100))
-    comments: Mapped[List["Comment"]] = relationship("Comment", back_populates="author")
+    comments: Mapped[list[Comment]] = relationship(back_populates="author")
 
-    def __str__(self) -> str:  # noqa: D105
+    def __str__(self) -> str:
         return self.name
 
 
@@ -50,14 +51,14 @@ class Post(Base):
     __tablename__ = "posts"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     title: Mapped[str] = mapped_column(String(200))
-    tags: Mapped[List["Tag"]] = relationship(
-        "Tag", back_populates="post", cascade="all, delete-orphan"
+    tags: Mapped[list[Tag]] = relationship(
+        back_populates="post", cascade="all, delete-orphan"
     )
-    comments: Mapped[List["Comment"]] = relationship(
-        "Comment", back_populates="post", cascade="all, delete-orphan"
+    comments: Mapped[list[Comment]] = relationship(
+        back_populates="post", cascade="all, delete-orphan"
     )
 
-    def __str__(self) -> str:  # noqa: D105
+    def __str__(self) -> str:
         return self.title
 
 
@@ -65,53 +66,60 @@ class Tag(Base):
     __tablename__ = "tags"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(100))
+    position: Mapped[int | None] = mapped_column(Integer, nullable=True)
     post_id: Mapped[int] = mapped_column(ForeignKey("posts.id"))
-    post: Mapped["Post"] = relationship("Post", back_populates="tags")
+    post: Mapped[Post] = relationship(back_populates="tags")
 
-    def __str__(self) -> str:  # noqa: D105
+    def __str__(self) -> str:
         return self.name
 
 
 class Comment(Base):
-    """Has a FK to both Post (parent) and User (editable FK-select)."""
-
     __tablename__ = "comments"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     body: Mapped[str] = mapped_column(Text)
     post_id: Mapped[int] = mapped_column(ForeignKey("posts.id"))
-    author_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("users.id"), nullable=True
-    )
-    post: Mapped["Post"] = relationship("Post", back_populates="comments")
-    author: Mapped[Optional["User"]] = relationship("User", back_populates="comments")
+    author_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
+    post: Mapped[Post] = relationship(back_populates="comments")
+    author: Mapped[User | None] = relationship(back_populates="comments")
 
-    def __str__(self) -> str:  # noqa: D105
+    def __str__(self) -> str:
         return self.body[:40]
 
 
+class Attachment(Base):
+    """FK column to Post without any relationship()."""
+
+    __tablename__ = "attachments"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    filename: Mapped[str] = mapped_column(String(100))
+    post_id: Mapped[int] = mapped_column(ForeignKey("posts.id"))
+
+
 # ---------------------------------------------------------------------------
-# Inline + Admin view definitions
+# Admin configuration
 # ---------------------------------------------------------------------------
 
 
 class TagInline(InlineModelAdmin, model=Tag):
     inline_label = "Tags"
-    icon = "fa fa-tag"
+    icon = "fa-solid fa-tag"
     layout = "sidebar"
+    order_field = "position"
     column_list = [Tag.name]
     column_searchable_list = [Tag.name]
+    form_excluded_columns = [Tag.position]
     page_size = 3
-    can_delete = True
 
 
 class CommentInline(InlineModelAdmin, model=Comment):
     inline_label = "Comments"
-    icon = "fa fa-comments"
+    icon = "fa-solid fa-comments"
     layout = "center"
     column_list = [Comment.body, Comment.author]
+    column_labels = {Comment.body: "Text"}
     column_searchable_list = [Comment.body]
     page_size = 3
-    can_delete = True
 
 
 class UserAdmin(ModelView, model=User):
@@ -124,137 +132,149 @@ class PostAdmin(ModelViewWithInlines, model=Post):
 
 
 # ---------------------------------------------------------------------------
-# Fixtures
+# Database
 # ---------------------------------------------------------------------------
 
 
-@pytest.fixture(scope="session")
-def engine():
-    """Single async engine shared across the session (in-memory SQLite)."""
-    return create_async_engine("sqlite+aiosqlite:///:memory:", echo=False)
+@dataclasses.dataclass
+class DB:
+    mode: str
+    engine: Any
+    session_maker: Any
+    sync: sessionmaker  # always-sync maker for seeding / assertions
 
+    def add(self, *objs: Any) -> list[Any]:
+        with self.sync() as s:
+            s.add_all(objs)
+            s.commit()
+            for o in objs:
+                s.refresh(o)
+                s.expunge(o)
+        return list(objs)
 
-@pytest.fixture(scope="session")
-def session_maker(engine):
-    return async_sessionmaker(engine, expire_on_commit=False)
+    def post(self, title: str = "Post") -> Post:
+        return self.add(Post(title=title))[0]
 
+    def user(self, name: str = "Alice") -> User:
+        return self.add(User(name=name))[0]
 
-@pytest_asyncio.fixture(scope="session", autouse=True)
-async def create_tables(engine):
-    """Create schema once per test session."""
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    yield
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.drop_all)
-
-
-@pytest.fixture()
-def app(engine, session_maker):
-    """Full FastAPI + sqladmin app with inline routes registered."""
-    _app = FastAPI()
-    admin = Admin(_app, engine=engine, session_maker=session_maker)
-    setup_inline_routes(admin)
-    # Explicitly inject the template directory from the installed package.
-    # This ensures templates are found regardless of the project layout or
-    # whether the user renamed the templates subfolder.
-    import pathlib
-    from jinja2 import ChoiceLoader, FileSystemLoader
-    import sqladmin_inline.views as _views_module
-
-    _pkg_tmpl_dir = str(
-        pathlib.Path(_views_module.__file__).parent.parent / "templates"
-    )
-    existing = admin.templates.env.loader
-    loaders = existing.loaders if hasattr(existing, "loaders") else [existing]
-    if not any(
-        isinstance(l, FileSystemLoader)
-        and _pkg_tmpl_dir in getattr(l, "searchpath", [])
-        for l in loaders
-    ):
-        admin.templates.env.loader = ChoiceLoader(
-            [FileSystemLoader(_pkg_tmpl_dir)] + list(loaders)
+    def tags(self, post: Post, n: int, prefix: str = "tag") -> list[Tag]:
+        return self.add(
+            *[Tag(name=f"{prefix}{i}", post_id=post.id) for i in range(1, n + 1)]
         )
-    admin.add_view(UserAdmin)
-    admin.add_view(PostAdmin)
-    return _app
+
+    def comments(self, post: Post, n: int, author: User | None = None) -> list[Comment]:
+        return self.add(
+            *[
+                Comment(
+                    body=f"Comment {i}",
+                    post_id=post.id,
+                    author_id=author.id if author else None,
+                )
+                for i in range(1, n + 1)
+            ]
+        )
+
+    def get(self, model: Any, pk: Any) -> Any:
+        with self.sync() as s:
+            obj = s.get(model, pk)
+            if obj is not None:
+                s.expunge(obj)
+            return obj
+
+    def all(self, model: Any, *where: Any, order_by: Any = None) -> list[Any]:
+        with self.sync() as s:
+            stmt = select(model).where(*where)
+            if order_by is not None:
+                stmt = stmt.order_by(order_by)
+            rows = list(s.execute(stmt).scalars())
+            s.expunge_all()
+            return rows
 
 
-@pytest.fixture()
-def client(app):
-    """Sync test client (no ASGI lifespan)."""
-    with TestClient(app, raise_server_exceptions=True) as c:
+@pytest.fixture(params=["async", "sync"])
+async def db(request: pytest.FixtureRequest, tmp_path: Any) -> AsyncIterator[DB]:
+    url = tmp_path / "test.db"
+    sync_engine = create_engine(
+        f"sqlite:///{url}", connect_args={"check_same_thread": False}
+    )
+    Base.metadata.create_all(sync_engine)
+    seed = sessionmaker(sync_engine, expire_on_commit=False)
+    if request.param == "async":
+        engine = create_async_engine(f"sqlite+aiosqlite:///{url}")
+        yield DB(
+            "async", engine, async_sessionmaker(engine, expire_on_commit=False), seed
+        )
+        await engine.dispose()
+    else:
+        yield DB("sync", sync_engine, seed, seed)
+    sync_engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Application
+# ---------------------------------------------------------------------------
+
+AppFactory = Callable[..., tuple[FastAPI, Admin]]
+
+
+@pytest.fixture
+def make_app(db: DB) -> AppFactory:
+    def _make(*views: Any, **admin_kwargs: Any) -> tuple[FastAPI, Admin]:
+        app = FastAPI()
+        admin = Admin(
+            app, engine=db.engine, session_maker=db.session_maker, **admin_kwargs
+        )
+        setup_inline_routes(admin)
+        for view in views or (UserAdmin, PostAdmin):
+            admin.add_view(view)
+        return app, admin
+
+    return _make
+
+
+def client_for(app: Any, **kwargs: Any) -> httpx.AsyncClient:
+    transport = httpx.ASGITransport(app=app, **kwargs)
+    return httpx.AsyncClient(
+        transport=transport, base_url="http://test", follow_redirects=False
+    )
+
+
+@pytest.fixture
+async def client(make_app: AppFactory) -> AsyncIterator[httpx.AsyncClient]:
+    app, _ = make_app()
+    async with client_for(app) as c:
         yield c
 
 
-@pytest_asyncio.fixture()
-async def db(session_maker) -> AsyncGenerator[AsyncSession, None]:
-    """Async session for direct DB manipulation in tests."""
-    async with session_maker() as session:
-        yield session
+@pytest.fixture
+def admin_view(make_app: AppFactory) -> PostAdmin:
+    _, admin = make_app()
+    return admin._find_model_view("post")  # type: ignore[return-value]
 
 
-@pytest_asyncio.fixture()
-async def post(db) -> Post:
-    """A fresh Post with no children."""
-    p = Post(title="Test Post")
-    db.add(p)
-    await db.commit()
-    await db.refresh(p)
-    yield p
-    # Cleanup
-    await db.delete(p)
-    await db.commit()
+def inline_url(post_id: Any, inline: str = "tag_inline", action: str = "list") -> str:
+    return f"/admin/post/inline/{inline}/{post_id}/{action}"
 
 
-@pytest_asyncio.fixture()
-async def user(db) -> User:
-    """A User for FK-select tests."""
-    u = User(name="Alice")
-    db.add(u)
-    await db.commit()
-    await db.refresh(u)
-    yield u
-    await db.delete(u)
-    await db.commit()
+def fake_request(
+    path: str = "/admin/post/edit/1", query: bytes = b"", **path_params: Any
+) -> Any:
+    from starlette.requests import Request
+
+    return Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": path,
+            "query_string": query,
+            "headers": [],
+            "path_params": path_params,
+        }
+    )
 
 
-@pytest_asyncio.fixture()
-async def post_with_tags(db, session_maker) -> Post:
-    """Post with 5 tags (enough to test pagination with page_size=3)."""
-    p = Post(title="Tagged Post")
-    db.add(p)
-    await db.commit()
-    await db.refresh(p)
-
-    for i in range(1, 6):
-        db.add(Tag(name=f"tag{i}", post_id=p.id))
-    await db.commit()
-    yield p
-
-    # Cleanup
-    from sqlalchemy import select, delete
-
-    await db.execute(delete(Tag).where(Tag.post_id == p.id))
-    await db.delete(p)
-    await db.commit()
-
-
-@pytest_asyncio.fixture()
-async def post_with_comments(db, user) -> Post:
-    """Post with 4 comments linked to a User (FK-select)."""
-    p = Post(title="Commented Post")
-    db.add(p)
-    await db.commit()
-    await db.refresh(p)
-
-    for i in range(1, 5):
-        db.add(Comment(body=f"Comment body {i}", post_id=p.id, author_id=user.id))
-    await db.commit()
-    yield p
-
-    from sqlalchemy import delete
-
-    await db.execute(delete(Comment).where(Comment.post_id == p.id))
-    await db.delete(p)
-    await db.commit()
+@pytest.fixture
+def sync_session(db: DB) -> Iterator[Session]:
+    with db.sync() as s:
+        yield s

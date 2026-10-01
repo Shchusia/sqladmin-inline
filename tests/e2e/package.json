@@ -1,0 +1,7 @@
+{
+  "name": "sqladmin-inline-e2e",
+  "private": true,
+  "type": "module",
+  "description": "Headless (jsdom) end-to-end test of the inline UI with all external network access blocked.",
+  "dependencies": { "jsdom": "^26.0.0" }
+}

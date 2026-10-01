@@ -4,17 +4,23 @@
 
 [![Coverage Status](https://img.shields.io/badge/%20Python%20Versions-%3E%3D3.10-informational)](https://github.com/Shchusia/sqladmin_inline)
 [![Coverage Status](https://coveralls.io/repos/github/Shchusia/sqladmin-inline/badge.svg?branch=feature/v0.0.1)](https://coveralls.io/github/Shchusia/sqladmin-inline?branch=feature/v0.0.1)
-[![Coverage Status](https://img.shields.io/badge/Version-0.0.4-informational)](https://pypi.org/project/sqladmin_inline/)
+[![Coverage Status](https://img.shields.io/badge/Version-0.1.0-informational)](https://pypi.org/project/sqladmin_inline/)
+
+**Works fully offline.** Every asset is either bundled with this package (SortableJS, the
+inline JS/CSS) or already shipped by sqladmin (Bootstrap/Tabler, Font Awesome, jQuery,
+select2, flatpickr). Nothing is loaded from a CDN, so the admin keeps working inside a VPN
+or on an isolated network. This is enforced by the test-suite.
 
 ## Features
 
-+ Django-style Inlines: Add, edit, and remove related records without leaving the main form.
-+ Drag-and-Drop Reordering: Support for manual row reordering using SortableJS by simply defining an order_field
-+ AJAX-powered "Load More": Seamlessly append more records to the list without a full page reload.
-+ Bulk Actions: Integrated checkbox system for bulk deleting multiple child records at once.
-+ Async & Sync Support: Fully compatible with both asynchronous and synchronous SQLAlchemy sessions.
-+ Real-time Search & Pagination: Manage large datasets with AJAX-based search and paginated views.
-+ Flexible Layouts: Supports modal-based editing and different positions (center or sidebar).
+- Add / edit in a modal, bulk delete with confirmation
+- AJAX search, pagination and "Load more"
+- Drag-and-drop ordering (`order_field`)
+- Layouts: `center` (under the form) or `sidebar` (right column)
+- Async **and** sync SQLAlchemy session makers
+- Same security as sqladmin's edit page: `authentication_backend`, `is_accessible`,
+  `can_edit`, `check_can_edit` and `form_edit_query` all apply to inline endpoints
+- Works with sqladmin's `base_url` and behind reverse proxies (`root_path`)
 
 ## Installation
 
@@ -22,113 +28,98 @@
 pip install sqladmin-inline
 ```
 
-## Full Example
-
-Based on the provided demo.py, here is how you can set up a Post with inline Tags and Comments:
+## Quick start
 
 ```python
-
+from fastapi import FastAPI
 from sqladmin import Admin
 from sqladmin_inline import InlineModelAdmin, ModelViewWithInlines, setup_inline_routes
 
-# 1. Define the Inline configuration
+
 class TagInline(InlineModelAdmin, model=Tag):
-    """
-    Tags — sidebar, drag-and-drop via position field.
-
-    Features:
-    - layout = "sidebar"  → displayed on the right side
-    - order_field = "position" → rows are draggable,
-      position updates automatically via /reorder
-    - column_default_sort not needed: order_field takes priority
-    - can_create = True → Add button enabled
-    """
-
     inline_label = "Tags"
-    icon = "fas fa-tag"
-    layout        = "sidebar"
-
-    # Drag-and-drop: integer order field
-    order_field = "position"
-
-    column_list = [Tag.name]  # position is shown as # automatically
-    column_labels = {Tag.name: "Tag name"}
+    icon = "fa-solid fa-tag"
+    layout = "sidebar"
+    order_field = "position"            # integer column -> drag-and-drop
+    column_list = [Tag.name]
     column_searchable_list = [Tag.name]
+    form_excluded_columns = [Tag.post, Tag.position]
     page_size = 5
-    can_delete = True
-    can_create = True
-    can_edit = True
-    form_excluded_columns = ["post"]
 
 
 class CommentInline(InlineModelAdmin, model=Comment):
-    """
-    Comments — center, sorted by ID desc, FK-select for User.
-
-    Features:
-    - column_default_sort = ("id", True)  → new ones on top
-    - page_size = 3 → "Load more" button appears with 4+ comments
-    - can_delete = True → deletion enabled
-    - can_edit = False   → no edit button
-    - form_columns includes Comment.author → FK-select
-    """
-
     inline_label = "Comments"
-    icon = "fa fa-comments"
-    layout = "center"
-
-    # Sorting: new ones on top
-    column_default_sort = ("id", True)
-
+    icon = "fa-solid fa-comments"
+    column_default_sort = ("id", True)   # newest first
     column_list = [Comment.body, Comment.author]
-    column_labels = {Comment.body: "Text", "author": "Author"}
-    column_searchable_list = [Comment.body]
-    page_size = 3  # intentionally small to demonstrate Load More
-    can_delete = True
-    can_create = True
-    can_edit = True
-    form_columns = [Comment.body, Comment.author]
+    column_labels = {Comment.body: "Text"}
+    form_columns = [Comment.body, Comment.author]   # FK select for author
+    can_edit = False
 
-# 2. Use ModelViewWithInlines for the parent model
+
 class PostAdmin(ModelViewWithInlines, model=Post):
-    name = "Post"
-    name_plural = "Posts"
-    icon = "fa-solid fa-newspaper"
-    column_list = [Post.id, Post.title, Post.author]
-
-    form_columns = [Post.title, Post.body, Post.author]
-    column_labels = {Post.author: "Author", Post.title: "Title", Post.body: "Content"}
-
-    # Tags → sidebar + drag-and-drop
-    # Comments → center + sort desc + load more
+    column_list = [Post.id, Post.title]
     inlines = [TagInline, CommentInline]
 
-# 3. Initialize and register
+
 app = FastAPI()
-admin = Admin(app, engine, session_maker=session_mk)
-
-# This step is CRITICAL to register AJAX routes and templates
-setup_inline_routes(admin)
-
+admin = Admin(app, engine)
+setup_inline_routes(admin)   # registers endpoints, templates and static files
 admin.add_view(PostAdmin)
 ```
 
-## Configuration Reference
+## `InlineModelAdmin` options
 
-InlineModelAdmin Attributes
+| Option | Default | Description |
+|---|---|---|
+| `model` | — | Child SQLAlchemy model (class keyword) |
+| `fk_attr` | auto | Relationship or column pointing to the parent |
+| `identity` | `<model>_inline` | Set it when a parent has two inlines of the same model |
+| `inline_label` | `<Model>s` | Section title |
+| `icon` | `None` | Icon classes, e.g. `"fa-solid fa-tag"` (Font Awesome bundled with sqladmin) |
+| `layout` | `"center"` | `"center"` or `"sidebar"` |
+| `column_list` | all non-PK columns | Columns of the table |
+| `column_labels` | `{}` | Column labels |
+| `column_searchable_list` | `[]` | Columns used by the search box |
+| `column_default_sort` | PK asc | `(column, descending)` |
+| `order_field` | `None` | Integer column for drag-and-drop ordering |
+| `page_size` | `5` | Rows per page / per "Load more" |
+| `can_create`, `can_edit`, `can_delete` | `True` | Inline permissions |
+| `form_columns`, `form_excluded_columns`, `form_args`, `form_widget_args` | — | As in `sqladmin.ModelView` |
 
-+ `model`: The SQLAlchemy model class (required).
-+ `fk_attr`: Explicit foreign key attribute name (auto-detected if omitted).
-+ `column_list`: Columns to display in the inline table.
-+ `column_searchable_list`: Columns to include in the AJAX search.
-+ `layout`: "center" (below form) or "sidebar" (right side).
-+ `can_create`, `can_edit`, `can_delete`: Permissions for the inline records.
-+ `order_field`: The name of the integer column on the model used for manual drag-and-drop ordering.
-+ `column_default_sort`: A tuple (column_name, is_descending) to set the default list order.
-+ `icon`: A FontAwesome or Tabler icon class string for the inline header (e.g., "fas fa-tag").
-+ `page_size`: Number of rows displayed per page or loaded via "Load More" (default: 5).
+If the form contains the relationship to the parent, it is pre-selected when adding a row, and
+the parent passed in the URL always wins on create. Most projects simply exclude it
+(`form_excluded_columns = [Tag.post]`).
 
-## Requirements
-+ SQLAdmin >= 0.16.0
-+ SQLAlchemy >= 2.0.0
-+ Starlette / FastAPI
+## HTTP endpoints
+
+All are relative to the admin mount point and protected like the parent's edit page:
+
+```
+GET    /{identity}/inline/{inline}/{parent_pk}/list      table fragment (?page=&search=)
+GET    /{identity}/inline/{inline}/{parent_pk}/form      form fragment (?pk= to edit)
+POST   /{identity}/inline/{inline}/{parent_pk}/save      create/update (422 + form on errors)
+DELETE /{identity}/inline/{inline}/{parent_pk}/delete    {"pks": [...]}
+POST   /{identity}/inline/{inline}/{parent_pk}/reorder   {"pks": [...]} in the new order
+GET    /_inline/static/...                               bundled JS/CSS
+```
+
+## Compatibility
+
+Python ≥ 3.10, SQLAlchemy ≥ 2.0, sqladmin ≥ 0.25 (tested with 0.25, 0.28, 0.30, 0.32).
+On sqladmin ≥ 0.31 the official `edit_context` hook is used; older versions get a thin
+wrapper around the edit route that keeps sqladmin's own handler.
+
+## Development
+
+```shell
+task sync     # uv sync with demo/tests/lint groups
+task test     # unit + HTTP + security + offline checks (async and sync sessions)
+task e2e      # headless browser test (needs node), external network blocked
+task lint     # pre-commit: ruff, black, mypy, bandit
+task demo     # http://localhost:8000/admin
+```
+
+## Licenses
+
+SortableJS (MIT) is bundled; its license is in `sqladmin_inline/statics/licenses/`.

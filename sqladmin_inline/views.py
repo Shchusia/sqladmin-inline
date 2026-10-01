@@ -1,26 +1,204 @@
-# views.py
 """
 sqladmin_inline.views
-~~~~~~~~~~~~~~~~~~~~~~
+~~~~~~~~~~~~~~~~~~~~~
 
-ModelViewWithInlines class and HTTP route handlers for inline CRUD operations.
+:class:`ModelViewWithInlines` and the HTTP endpoints used by inline sections.
+
+Endpoints (relative to the admin mount point, e.g. ``/admin``)::
+
+    GET    /{identity}/inline/{inline}/{parent_pk}/list     table fragment
+    GET    /{identity}/inline/{inline}/{parent_pk}/form     add/edit form fragment
+    POST   /{identity}/inline/{inline}/{parent_pk}/save     create or update
+    DELETE /{identity}/inline/{inline}/{parent_pk}/delete   bulk delete
+    POST   /{identity}/inline/{inline}/{parent_pk}/reorder  drag-and-drop order
+    GET    /_inline/static/...                              bundled JS/CSS
+
+Every endpoint goes through sqladmin's own ``login_required`` and the parent
+view's ``is_accessible`` / ``can_edit`` / ``check_can_edit`` checks, exactly
+like sqladmin's edit page.  No asset is loaded from the internet.
 """
 
 from __future__ import annotations
 
 from collections.abc import Sequence
+import inspect
+import json
 import logging
+import pathlib
+import re
 from typing import Any, ClassVar
+from urllib.parse import quote
 
+from jinja2 import ChoiceLoader, FileSystemLoader
 from sqladmin import ModelView
+from sqladmin.authentication import login_required
+from sqladmin.helpers import get_object_identifier
 from sqlalchemy import inspect as sa_inspect
-from sqlalchemy import select as sa_select
+from starlette.exceptions import HTTPException
 from starlette.requests import Request
 from starlette.responses import JSONResponse, Response
+from starlette.routing import Mount, Route
+from starlette.staticfiles import StaticFiles
 
 from sqladmin_inline.inline import InlineModelAdmin, InlinePage
 
 logger = logging.getLogger(__name__)
+
+PACKAGE_DIR = pathlib.Path(__file__).parent
+TEMPLATES_DIR = PACKAGE_DIR / "templates"
+STATICS_DIR = PACKAGE_DIR / "statics"
+STATICS_ROUTE_NAME = "inline_statics"
+STATICS_PATH = "/_inline/static"
+STATE_ATTR = "sqladmin_inline_contexts"
+_INSTALLED_ATTR = "_sqladmin_inline_installed"
+
+# sqladmin >= 0.31 calls ModelView.edit_context(); older versions need the
+# edit route to be wrapped instead.
+HAS_CONTEXT_HOOKS = hasattr(ModelView, "edit_context")
+
+
+# ---------------------------------------------------------------------------
+# Small helpers
+# ---------------------------------------------------------------------------
+
+
+async def _maybe_await(value: Any) -> Any:
+    if inspect.isawaitable(value):
+        return await value
+    return value
+
+
+def _int_param(value: Any, default: int = 1) -> int:
+    try:
+        return max(1, int(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _error(message: str, status_code: int) -> JSONResponse:
+    return JSONResponse({"error": message}, status_code=status_code)
+
+
+def _admin_root(request: Request) -> str:
+    """Path prefix of the admin app (``/admin``, ``/proxy/admin`` ...).
+
+    Paths (not absolute URLs) are used so the page keeps working behind
+    reverse proxies / VPN gateways that rewrite host or scheme.
+    """
+    return str(request.scope.get("root_path", "")).rstrip("/")
+
+
+def _prefix(inline_cls: type[InlineModelAdmin]) -> str:
+    """Safe HTML id prefix for an inline section."""
+    return re.sub(r"[^a-z0-9]+", "_", inline_cls.model.__name__.lower()).strip("_")
+
+
+def _encode_parent_pk(obj: Any) -> str:
+    """Encode the parent PK exactly like sqladmin does in its own URLs."""
+    return str(get_object_identifier(obj))
+
+
+def _inline_base_url(
+    request: Request, parent_identity: str, inline_identity: str, parent_pk: str
+) -> str:
+    return (
+        f"{_admin_root(request)}/{parent_identity}/inline/{inline_identity}/"
+        f"{quote(parent_pk, safe='')}"
+    )
+
+
+async def _get_parent_by_pk(
+    view: Any, pk_str: str, request: Request | None = None
+) -> Any | None:
+    """Load the parent through the view's own ``form_edit_query``.
+
+    Custom filters a project puts into ``form_edit_query`` (multi-tenancy,
+    soft-delete, ...) therefore apply to inline endpoints as well.
+    """
+    scope: dict[str, Any] = (
+        dict(request.scope)
+        if request is not None
+        else {
+            "type": "http",
+            "method": "GET",
+            "path": "/",
+            "headers": [],
+            "query_string": b"",
+        }
+    )
+    scope["path_params"] = {**scope.get("path_params", {}), "pk": pk_str}
+    sub_request = Request(scope)
+    try:
+        return await view.get_object_for_edit(sub_request)
+    except (ValueError, TypeError, LookupError):
+        return None
+
+
+def _form_relationships(inline_cls: type[InlineModelAdmin], form: Any) -> list[str]:
+    mapper = sa_inspect(inline_cls.model)
+    return [f.name for f in form if f.name in mapper.relationships]
+
+
+def _normalize(admin: Any, obj: Any) -> dict[str, Any]:
+    fn = getattr(admin, "_normalize_wtform_data", None)
+    return fn(obj) if fn else {}
+
+
+def _denormalize(admin: Any, data: dict[str, Any], obj: Any) -> dict[str, Any]:
+    fn = getattr(admin, "_denormalize_wtform_data", None)
+    return fn(data, obj) if fn else dict(data)
+
+
+async def build_inline_context(
+    view: Any,
+    inline_cls: type[InlineModelAdmin],
+    request: Request,
+    parent_obj: Any | None,
+    *,
+    page: int | None = None,
+    search: str | None = None,
+) -> dict[str, Any]:
+    """Template context for one inline section."""
+    if page is None:
+        page = _int_param(request.query_params.get(f"_il_{inline_cls.identity}_page"))
+    if search is None:
+        search = request.query_params.get(f"_il_{inline_cls.identity}_search", "")
+
+    if parent_obj is not None:
+        pagination = await inline_cls.get_page(
+            view.session_maker, parent_obj, page=page, search=search
+        )
+        parent_pk = _encode_parent_pk(parent_obj)
+    else:
+        pagination = InlinePage(
+            rows=[], page=1, page_size=inline_cls.page_size, count=0
+        )
+        parent_pk = ""
+
+    display_cols = inline_cls._display_columns()
+    base_url = _inline_base_url(request, view.identity, inline_cls.identity, parent_pk)
+    return {
+        "inline_cls": inline_cls,
+        "identity": inline_cls.identity,
+        "parent_identity": view.identity,
+        "prefix": _prefix(inline_cls),
+        "label": inline_cls.inline_label,
+        "icon": inline_cls.icon,
+        "layout": inline_cls.layout,
+        "display_columns": display_cols,
+        "column_labels": {c: inline_cls._get_label(c) for c in display_cols},
+        "pagination": pagination,
+        "search": search,
+        "search_enabled": bool(inline_cls._search_columns()),
+        "can_create": inline_cls.can_create,
+        "can_edit": inline_cls.can_edit,
+        "can_delete": inline_cls.can_delete,
+        "order_field": inline_cls.order_field,
+        "sortable": bool(inline_cls.order_field) and inline_cls.can_edit,
+        "column_default_sort": inline_cls.column_default_sort,
+        "parent_pk": parent_pk,
+        "base_url": base_url,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -29,15 +207,10 @@ logger = logging.getLogger(__name__)
 
 
 class ModelViewWithInlines(ModelView):
-    """Base ModelView with Django-style inline support.
-
-    Extends sqladmin.ModelView to include inline editing capabilities.
-    Override create_template and edit_template to include inline sections.
+    """``sqladmin.ModelView`` with Django-style inline sections on the edit page.
 
     Attributes:
-        inlines: List of InlineModelAdmin subclasses to display.
-        create_template: Template for create view (default: sqladmin_inline/create.html).
-        edit_template: Template for edit view (default: sqladmin_inline/edit.html).
+        inlines: ``InlineModelAdmin`` subclasses to show on the edit page.
     """
 
     inlines: ClassVar[Sequence[type[InlineModelAdmin]]] = []
@@ -46,574 +219,364 @@ class ModelViewWithInlines(ModelView):
     edit_template: ClassVar[str] = "sqladmin_inline/edit.html"
 
     def _inline_relationship_names(self) -> list[str]:
-        """Get to-many relationship names managed by inlines.
-
-        Returns:
-            List of relationship names to exclude from parent form.
-        """
+        """To-many relationships of the parent that are managed by inlines."""
         if not self.inlines:
             return []
         try:
-            mapper = sa_inspect(self.model)  # type: ignore[var-annotated]
-        except Exception:
+            mapper: Any = sa_inspect(self.model)
+        except Exception:  # pragma: no cover - model is validated by sqladmin
             return []
         inline_models = {il.model for il in self.inlines}
-        excluded = []
-        for rel in mapper.relationships:
-            if (
-                rel.direction.name in ("ONETOMANY", "MANYTOMANY")
-                and rel.mapper.class_ in inline_models
-            ):
-                excluded.append(rel.key)
-        return excluded
+        return [
+            rel.key
+            for rel in mapper.relationships
+            if rel.direction.name in ("ONETOMANY", "MANYTOMANY")
+            and rel.mapper.class_ in inline_models
+        ]
 
     def get_form_columns(self) -> list[str]:
-        """Get form columns excluding to-many relationships managed by inlines."""
-        base = super().get_form_columns()
+        """Form columns without the relationships edited through inlines."""
         excluded = set(self._inline_relationship_names())
-        return [c for c in base if c not in excluded]
+        return [c for c in super().get_form_columns() if c not in excluded]
+
+    def find_inline(self, inline_identity: str) -> type[InlineModelAdmin] | None:
+        """Return the inline class registered under ``inline_identity``."""
+        for inline_cls in self.inlines:
+            if inline_cls.identity == inline_identity:
+                return inline_cls
+        return None
 
     async def _build_inline_contexts(
         self, request: Request, parent_obj: Any | None = None
     ) -> list[dict[str, Any]]:
-        """Build template contexts for all inlines.
+        """Template contexts for all inlines (empty pages when ``parent_obj`` is None)."""
+        return [
+            await build_inline_context(self, inline_cls, request, parent_obj)
+            for inline_cls in self.inlines
+        ]
 
-        Args:
-            request: Starlette request object.
-            parent_obj: Parent model instance (None for create view).
-
-        Returns:
-            List of context dictionaries for each inline.
-        """
-        contexts = []
-        for inline_cls in self.inlines:
-            FormClass = await inline_cls.scaffold_form(self.session_maker)
-            page = int(request.query_params.get(f"_il_{inline_cls.identity}_page", 1))
-            search = request.query_params.get(f"_il_{inline_cls.identity}_search", "")
-
-            if parent_obj is not None:
-                pagination = await inline_cls.get_page(
-                    self.session_maker, parent_obj, page=page, search=search
-                )
-            else:
-                pagination = InlinePage(
-                    rows=[], page=1, page_size=inline_cls.page_size, count=0
-                )
-
-            display_cols = inline_cls._display_columns()
-            contexts.append(
-                {
-                    "inline_cls": inline_cls,
-                    "identity": inline_cls.identity,
-                    "prefix": _prefix(inline_cls),
-                    "label": inline_cls.inline_label,
-                    "display_columns": display_cols,
-                    "column_labels": {
-                        c: inline_cls._get_label(c) for c in display_cols
-                    },
-                    "pagination": pagination,
-                    "search": search,
-                    "search_enabled": bool(inline_cls._search_columns()),
-                    "icon": getattr(inline_cls, "icon", None),
-                    "layout": getattr(inline_cls, "layout", "center"),
-                    "can_create": inline_cls.can_create,
-                    "can_edit": inline_cls.can_edit,
-                    "can_delete": inline_cls.can_delete,
-                    "order_field": getattr(inline_cls, "order_field", None),
-                    "column_default_sort": getattr(
-                        inline_cls, "column_default_sort", None
-                    ),
-                    "form_class": FormClass,
-                    "parent_pk": _encode_parent_pk(parent_obj) if parent_obj else "",
-                }
+    async def edit_context(self, request: Request) -> dict[str, Any]:
+        """sqladmin >= 0.31 hook: add ``inline_contexts`` to the edit page."""
+        parent_hook = getattr(super(), "edit_context", None)
+        context = dict(await parent_hook(request)) if parent_hook else {}
+        if not self.inlines:
+            return context
+        parent_obj = await self.get_object_for_edit(request)
+        if parent_obj is not None:
+            context["inline_contexts"] = await self._build_inline_contexts(
+                request, parent_obj
             )
-        return contexts
+        return context
 
 
 # ---------------------------------------------------------------------------
-# Admin Setup
+# Routes
 # ---------------------------------------------------------------------------
 
 
 def setup_inline_routes(admin: Any) -> None:
-    """Register inline CRUD API routes and inject template directory.
+    """Register inline endpoints, bundled static files and templates.
 
-    Call this once after creating the Admin instance:
+    Call once after creating the ``Admin``::
 
-        admin = Admin(app, engine=engine)
+        admin = Admin(app, engine)
         setup_inline_routes(admin)
+        admin.add_view(PostAdmin)
 
-    Args:
-        admin: sqladmin.Admin instance.
+    Calling it again on the same ``Admin`` is a no-op.
     """
-    import pathlib
+    if getattr(admin, _INSTALLED_ATTR, False):
+        return
 
-    from jinja2 import ChoiceLoader, FileSystemLoader
-    from starlette.routing import Route
+    # Templates ---------------------------------------------------------------
+    env = admin.templates.env
+    loader = env.loader
+    loaders = list(loader.loaders) if isinstance(loader, ChoiceLoader) else [loader]
+    env.loader = ChoiceLoader([FileSystemLoader(str(TEMPLATES_DIR)), *loaders])
 
-    our_tmpl = str(pathlib.Path(__file__).parent / "templates")
-    loader = admin.templates.env.loader
-    loaders = loader.loaders if hasattr(loader, "loaders") else [loader]
-    admin.templates.env.loader = ChoiceLoader(
-        [FileSystemLoader(our_tmpl)] + list(loaders)
-    )
+    # Helpers -----------------------------------------------------------------
 
-    def _find_view(identity: str) -> Any:
-        return admin._find_model_view(identity)
+    def _protect(handler: Any) -> Any:
+        """Run ``handler`` behind sqladmin's authentication (login_required)."""
 
-    def _find_inline(identity: str, inline_id: str) -> type[InlineModelAdmin] | None:
-        view = _find_view(identity)
-        if not hasattr(view, "inlines"):
-            return None
-        for cls in view.inlines:
-            if cls.identity == inline_id:
-                return cls  # type: ignore[no-any-return]
-        return None
+        @login_required
+        async def _guarded(_admin: Any, request: Request) -> Response:
+            return await handler(request)  # type: ignore[no-any-return]
 
-    async def inline_list(request: Request) -> Response:
-        """GET handler for inline table fragment."""
+        async def endpoint(request: Request) -> Response:
+            return await _guarded(admin, request)  # type: ignore[no-any-return]
+
+        endpoint.__name__ = handler.__name__
+        endpoint.__doc__ = handler.__doc__
+        return endpoint
+
+    async def _resolve(
+        request: Request,
+    ) -> tuple[Any, type[InlineModelAdmin], Any] | Response:
+        """Find view, inline and parent; enforce the parent's edit permissions."""
         identity = request.path_params["identity"]
-        inline_id = request.path_params["inline_identity"]
-        parent_pk_str = request.path_params["parent_pk"]
+        try:
+            view = admin._find_model_view(identity)
+        except HTTPException:
+            return _error("view not found", 404)
 
-        view = _find_view(identity)
-        inline_cls = _find_inline(identity, inline_id)
+        if not await _maybe_await(view.is_accessible(request)):
+            return _error("forbidden", 403)
+        if not getattr(view, "can_edit", True):
+            return _error("editing the parent is not allowed", 403)
+
+        find = getattr(view, "find_inline", None)
+        inline_cls = find(request.path_params["inline_identity"]) if find else None
         if inline_cls is None:
-            return JSONResponse({"error": "inline not found"}, status_code=404)
+            return _error("inline not found", 404)
 
-        parent_obj = await _get_parent_by_pk(view, parent_pk_str)
+        parent_obj = await _get_parent_by_pk(
+            view, request.path_params["parent_pk"], request
+        )
         if parent_obj is None:
-            return JSONResponse({"error": "parent not found"}, status_code=404)
+            return _error("parent not found", 404)
 
-        page = int(request.query_params.get("page", 1))
-        search = request.query_params.get("search", "")
+        check = getattr(view, "check_can_edit", None)
+        if check is not None and not await _maybe_await(check(request, parent_obj)):
+            return _error("forbidden", 403)
+        return view, inline_cls, parent_obj
 
-        pagination = await inline_cls.get_page(
-            view.session_maker, parent_obj, page=page, search=search
-        )
-        display_cols = inline_cls._display_columns()
-        FormClass = await inline_cls.scaffold_form(view.session_maker)
-
+    async def _render_form(
+        request: Request,
+        view: Any,
+        inline_cls: type[InlineModelAdmin],
+        form: Any,
+        child_pk: str,
+        status_code: int = 200,
+    ) -> Response:
+        parent_pk = request.path_params["parent_pk"]
         ctx = {
-            "request": request,
-            "inline_cls": inline_cls,
-            "identity": inline_id,
-            "parent_identity": identity,
-            "prefix": _prefix(inline_cls),
-            "label": inline_cls.inline_label,
-            "icon": getattr(inline_cls, "icon", None),
-            "layout": getattr(inline_cls, "layout", "center"),
-            "display_columns": display_cols,
-            "column_labels": {c: inline_cls._get_label(c) for c in display_cols},
-            "pagination": pagination,
-            "search": search,
-            "search_enabled": bool(inline_cls._search_columns()),
-            "can_create": inline_cls.can_create,
-            "can_edit": inline_cls.can_edit,
-            "can_delete": inline_cls.can_delete,
-            "order_field": getattr(inline_cls, "order_field", None),
-            "column_default_sort": getattr(inline_cls, "column_default_sort", None),
-            "form_class": FormClass,
-            "parent_pk": parent_pk_str,
-        }
-        return await admin.templates.TemplateResponse(  # type: ignore[no-any-return]
-            request, "sqladmin_inline/_inline_table.html", ctx
-        )
-
-    async def inline_form(request: Request) -> Response:
-        """GET handler for inline add/edit modal form."""
-        identity = request.path_params["identity"]
-        inline_id = request.path_params["inline_identity"]
-        parent_pk_str = request.path_params["parent_pk"]
-        child_pk = request.query_params.get("pk", "")
-
-        view = _find_view(identity)
-        inline_cls = _find_inline(identity, inline_id)
-        if inline_cls is None:
-            return JSONResponse({"error": "inline not found"}, status_code=404)
-
-        # Permission checks
-        if child_pk and not inline_cls.can_edit:
-            return JSONResponse({"error": "editing is not allowed"}, status_code=403)
-        if not child_pk and not inline_cls.can_create:
-            return JSONResponse({"error": "creating is not allowed"}, status_code=403)
-
-        FormClass = await inline_cls.scaffold_form(view.session_maker)
-        obj = None
-        form_data = None
-
-        if child_pk:
-            obj = await inline_cls.get_by_pk(view.session_maker, child_pk)
-            if obj:
-                form_data = {}
-                mapper = sa_inspect(inline_cls.model)
-
-                for column in mapper.columns:
-                    try:
-                        form_data[column.key] = getattr(obj, column.key)
-                    except Exception:  # noqa # nosec
-                        logger.debug("")
-
-                for rel in mapper.relationships:
-                    if rel.direction.name == "MANYTOONE":
-                        try:
-                            related_obj = getattr(obj, rel.key)
-                            if related_obj is not None:
-                                form_data[rel.key] = related_obj
-                        except Exception:
-                            for _, local_col in rel.synchronize_pairs:
-                                try:
-                                    fk_val = getattr(obj, local_col.key, None)
-                                    if fk_val is not None:
-                                        form_data[rel.key] = fk_val
-                                except Exception:  # noqa # nosec
-                                    pass  # noqa # nosec
-
-        form = FormClass(data=form_data) if form_data else FormClass()
-
-        if form_data:
-            print(f"Form data for {inline_cls.model.__name__}: {form_data.keys()}")
-            for field in form:
-                if field.type == "QuerySelectField":
-                    print(f"  Field {field.name}: data={field.data}")
-
-        ctx = {
-            "request": request,
             "form": form,
             "inline_cls": inline_cls,
-            "parent_identity": identity,
-            "inline_identity": inline_id,
-            "parent_pk": parent_pk_str,
+            "parent_identity": view.identity,
+            "inline_identity": inline_cls.identity,
+            "parent_pk": parent_pk,
             "child_pk": child_pk,
             "label": inline_cls.inline_label,
             "is_edit": bool(child_pk),
+            "base_url": _inline_base_url(
+                request, view.identity, inline_cls.identity, parent_pk
+            ),
         }
-        return await admin.templates.TemplateResponse(  # type: ignore[no-any-return]
-            request, "sqladmin_inline/_inline_form.html", ctx
-        )
-
-    async def inline_save(request: Request) -> Response:
-        """POST handler for saving inline record."""
-        identity = request.path_params["identity"]
-        inline_id = request.path_params["inline_identity"]
-        parent_pk_str = request.path_params["parent_pk"]
-
-        view = _find_view(identity)
-        inline_cls = _find_inline(identity, inline_id)
-        if inline_cls is None:
-            return JSONResponse({"error": "inline not found"}, status_code=404)
-
-        parent_obj = await _get_parent_by_pk(view, parent_pk_str)
-        if parent_obj is None:
-            return JSONResponse({"error": "parent not found"}, status_code=404)
-
-        FormClass = await inline_cls.scaffold_form(view.session_maker)
-        form_data = await request.form()
-        child_pk = form_data.get("_child_pk", "")
-
-        # Permission checks
-        if child_pk and not inline_cls.can_edit:
-            return JSONResponse({"error": "editing is not allowed"}, status_code=403)
-        if not child_pk and not inline_cls.can_create:
-            return JSONResponse({"error": "creating is not allowed"}, status_code=403)
-
-        form = FormClass(form_data)
-
-        if not form.validate():
-            ctx = {
-                "request": request,
-                "form": form,
-                "inline_cls": inline_cls,
-                "parent_identity": identity,
-                "inline_identity": inline_id,
-                "parent_pk": parent_pk_str,
-                "child_pk": child_pk,
-                "label": inline_cls.inline_label,
-                "is_edit": bool(child_pk),
-            }
-            return await admin.templates.TemplateResponse(  # type: ignore[no-any-return]
+        return await _maybe_await(  # type: ignore[no-any-return]
+            admin.templates.TemplateResponse(
                 request,
                 "sqladmin_inline/_inline_form.html",
                 ctx,
-                status_code=422,
+                status_code=status_code,
             )
+        )
 
-        data = {k: v for k, v in form.data.items() if k != "csrf_token"}
+    # Handlers ----------------------------------------------------------------
 
+    async def inline_list(request: Request) -> Response:
+        """GET: the inline table (one card) as an HTML fragment."""
+        resolved = await _resolve(request)
+        if isinstance(resolved, Response):
+            return resolved
+        view, inline_cls, parent_obj = resolved
+        ctx = await build_inline_context(
+            view,
+            inline_cls,
+            request,
+            parent_obj,
+            page=_int_param(request.query_params.get("page")),
+            search=request.query_params.get("search", ""),
+        )
+        return await _maybe_await(  # type: ignore[no-any-return]
+            admin.templates.TemplateResponse(
+                request, "sqladmin_inline/_inline_table.html", {"ctx": ctx}
+            )
+        )
+
+    async def inline_form(request: Request) -> Response:
+        """GET: add (no ``pk``) or edit (``?pk=``) form as an HTML fragment."""
+        resolved = await _resolve(request)
+        if isinstance(resolved, Response):
+            return resolved
+        view, inline_cls, parent_obj = resolved
+        child_pk = request.query_params.get("pk", "")
+
+        if child_pk and not inline_cls.can_edit:
+            return _error("editing is not allowed", 403)
+        if not child_pk and not inline_cls.can_create:
+            return _error("creating is not allowed", 403)
+
+        FormClass = await inline_cls.scaffold_form(view.session_maker)
+        if child_pk:
+            rels = _form_relationships(inline_cls, FormClass())
+            obj = await inline_cls.get_by_pk(
+                view.session_maker, child_pk, parent_obj, load=rels
+            )
+            if obj is None:
+                return _error("record not found", 404)
+            form = FormClass(obj=obj, data=_normalize(admin, obj))
+        else:
+            form = FormClass()
+            # Pre-select the parent if the form exposes the parent relationship.
+            for key in inline_cls._parent_keys(type(parent_obj)):
+                if key in form and key in sa_inspect(inline_cls.model).relationships:
+                    form[key].data = parent_obj
+        return await _render_form(request, view, inline_cls, form, child_pk)
+
+    async def inline_save(request: Request) -> Response:
+        """POST: create or update a child. 422 + form HTML on validation errors."""
+        resolved = await _resolve(request)
+        if isinstance(resolved, Response):
+            return resolved
+        view, inline_cls, parent_obj = resolved
+
+        form_data = await request.form()
+        child_pk = str(form_data.get("_child_pk", "") or "")
+        if child_pk and not inline_cls.can_edit:
+            return _error("editing is not allowed", 403)
+        if not child_pk and not inline_cls.can_create:
+            return _error("creating is not allowed", 403)
+
+        FormClass = await inline_cls.scaffold_form(view.session_maker)
+        form = FormClass(form_data)
+        if not form.validate():
+            return await _render_form(request, view, inline_cls, form, child_pk, 422)
+
+        data = _denormalize(admin, form.data, inline_cls.model)
+        data.pop("csrf_token", None)
         try:
             if child_pk:
-                await inline_cls.update_child(view.session_maker, child_pk, data)
-            else:
-                await inline_cls.create_child(view.session_maker, parent_obj, data)
-        except Exception as exc:
-            logger.exception(exc)
-            return JSONResponse({"error": str(exc)}, status_code=500)
-
-        return JSONResponse({"ok": True})
-
-    async def inline_delete(request: Request) -> Response:
-        """DELETE handler for bulk inline record deletion."""
-        identity = request.path_params["identity"]
-        inline_id = request.path_params["inline_identity"]
-
-        view = _find_view(identity)
-        inline_cls = _find_inline(identity, inline_id)
-        if inline_cls is None:
-            return JSONResponse({"error": "inline not found"}, status_code=404)
-
-        if not inline_cls.can_delete:
-            return JSONResponse({"error": "deletion is not allowed"}, status_code=403)
-
-        body = await request.json()
-        pks: list[str] = [str(p) for p in body.get("pks", [])]
-        deleted = 0
-        for pk_str in pks:
-            if await inline_cls.delete_child(view.session_maker, pk_str):
-                deleted += 1
-
-        return JSONResponse({"deleted": deleted})
-
-    async def _build_inline_contexts(
-        view: ModelViewWithInlines,
-        request: Request,
-        parent_obj: Any,
-    ) -> list[dict[str, Any]]:
-        """Build inline context for edit template."""
-        contexts = []
-        for inline_cls in view.inlines:
-            FormClass = await inline_cls.scaffold_form(view.session_maker)
-            display_cols = inline_cls._display_columns()
-            parent_pk_str = _encode_parent_pk(parent_obj)
-
-            page = int(request.query_params.get(f"_il_{inline_cls.identity}_page", 1))
-            search = request.query_params.get(f"_il_{inline_cls.identity}_search", "")
-
-            pagination = await inline_cls.get_page(
-                view.session_maker, parent_obj, page=page, search=search
-            )
-            contexts.append(
-                {
-                    "inline_cls": inline_cls,
-                    "identity": inline_cls.identity,
-                    "parent_identity": view.identity,
-                    "prefix": _prefix(inline_cls),
-                    "label": inline_cls.inline_label,
-                    "display_columns": display_cols,
-                    "column_labels": {
-                        c: inline_cls._get_label(c) for c in display_cols
-                    },
-                    "pagination": pagination,
-                    "search": search,
-                    "search_enabled": bool(inline_cls._search_columns()),
-                    "icon": getattr(inline_cls, "icon", None),
-                    "layout": getattr(inline_cls, "layout", "center"),
-                    "can_create": inline_cls.can_create,
-                    "can_edit": inline_cls.can_edit,
-                    "can_delete": inline_cls.can_delete,
-                    "order_field": getattr(inline_cls, "order_field", None),
-                    "column_default_sort": getattr(
-                        inline_cls, "column_default_sort", None
-                    ),
-                    "form_class": FormClass,
-                    "parent_pk": parent_pk_str,
-                }
-            )
-        return contexts
-
-    _original_edit_handler = admin.edit
-    import logging as _logging
-
-    from starlette.exceptions import HTTPException as _HTTPExc
-    from starlette.responses import RedirectResponse as _RR
-    from starlette.routing import Route as _Route
-
-    _logger = _logging.getLogger(__name__)
-
-    async def patched_edit(request: Request) -> Response:
-        """Patched edit handler with inline support."""
-        identity = request.path_params["identity"]
-        view = _find_view(identity)
-
-        if not hasattr(view, "inlines") or not view.inlines:
-            return await _original_edit_handler(request)  # type: ignore[no-any-return]
-
-        if not view.is_accessible(request):
-            raise _HTTPExc(status_code=403)
-
-        model_obj = await view.get_object_for_edit(request)
-        if model_obj is None:
-            raise _HTTPExc(status_code=404)
-
-        can_edit = await view.check_can_edit(request, model_obj)
-        if not can_edit:
-            raise _HTTPExc(status_code=403)
-
-        Form = await view.scaffold_form(view._form_edit_rules)
-
-        if request.method == "GET":
-            inline_contexts = await _build_inline_contexts(view, request, model_obj)
-            context = {
-                "obj": model_obj,
-                "model_view": view,
-                "form": Form(
-                    obj=model_obj, data=admin._normalize_wtform_data(model_obj)
-                ),
-                "inline_contexts": inline_contexts,
-            }
-            return await admin.templates.TemplateResponse(  # type: ignore[no-any-return]
-                request, view.edit_template, context
-            )
-
-        form_data = await admin._handle_form_data(request, model_obj)
-        form = Form(form_data)
-
-        inline_contexts = await _build_inline_contexts(view, request, model_obj)
-        context = {
-            "obj": model_obj,
-            "model_view": view,
-            "form": form,
-            "inline_contexts": inline_contexts,
-        }
-
-        if not form.validate():
-            return await admin.templates.TemplateResponse(  # type: ignore[no-any-return]
-                request, view.edit_template, context, status_code=400
-            )
-
-        form_data_dict = admin._denormalize_wtform_data(form.data, model_obj)
-        try:
-            if view.save_as and form_data.get("save") == "Save as new":
-                obj = await view.insert_model(request, form_data_dict)
-            else:
-                obj = await view.update_model(
-                    request, pk=request.path_params["pk"], data=form_data_dict
+                obj = await inline_cls.update_child(
+                    view.session_maker, child_pk, data, parent_obj
                 )
-        except Exception as exc:
-            _logger.exception(exc)
-            context["error"] = str(exc)
-            return await admin.templates.TemplateResponse(  # type: ignore[no-any-return]
-                request, view.edit_template, context, status_code=400
-            )
+                if obj is None:
+                    return _error("record not found", 404)
+            else:
+                obj = await inline_cls.create_child(
+                    view.session_maker, parent_obj, data
+                )
+        except Exception as exc:  # DB constraint errors, etc.
+            logger.exception("sqladmin-inline: saving %s failed", inline_cls.__name__)
+            return _error(str(exc), 400)
+        return JSONResponse({"ok": True, "pk": inline_cls.encode_pk(obj)})
 
-        url = admin.get_save_redirect_url(
-            request=request, form=form_data, obj=obj, model_view=view
-        )
-        return _RR(url=url, status_code=302)
-
-    existing_routes = list(admin.admin.router.routes)
-    for i, route in enumerate(existing_routes):
-        if getattr(route, "name", None) == "edit":
-            existing_routes[i] = _Route(
-                "/{identity}/edit/{pk:path}",
-                endpoint=patched_edit,
-                name="edit",
-                methods=["GET", "POST"],
-            )
-            break
-    admin.admin.router.routes = existing_routes
-
-    # Register reorder route
-    async def inline_reorder(request: Request) -> Response:
-        """POST handler to reorder a child record (drag-and-drop)."""
-        identity = request.path_params["identity"]
-        inline_id = request.path_params["inline_identity"]
-
-        inline_cls = _find_inline(identity, inline_id)
-        if inline_cls is None or inline_cls.order_field is None:
-            return JSONResponse({"error": "reorder not supported"}, status_code=404)
-
-        view = _find_view(identity)
-        if view is None:
-            return JSONResponse({"error": "view not found"}, status_code=404)
-
+    async def _json_pks(request: Request) -> list[str] | Response:
         try:
             body = await request.json()
-            ordered_pks = body.get("pks", [])  # list of pk strings in new order
-            for position, pk_str in enumerate(ordered_pks, start=1):
-                await inline_cls.reorder_child(
-                    view.session_maker, str(pk_str), position
+        except (ValueError, json.JSONDecodeError):
+            return _error("invalid JSON body", 400)
+        pks = body.get("pks") if isinstance(body, dict) else None
+        if not isinstance(pks, list):
+            return _error('body must be {"pks": [...]}', 400)
+        return [str(p) for p in pks]
+
+    async def inline_delete(request: Request) -> Response:
+        """DELETE: bulk delete ``{"pks": [...]}`` children of this parent."""
+        resolved = await _resolve(request)
+        if isinstance(resolved, Response):
+            return resolved
+        view, inline_cls, parent_obj = resolved
+        if not inline_cls.can_delete:
+            return _error("deletion is not allowed", 403)
+        pks = await _json_pks(request)
+        if isinstance(pks, Response):
+            return pks
+        deleted = await inline_cls.delete_children(view.session_maker, pks, parent_obj)
+        return JSONResponse({"deleted": deleted})
+
+    async def inline_reorder(request: Request) -> Response:
+        """POST: ``{"pks": [...]}`` in the new order -> order_field = 1..N."""
+        resolved = await _resolve(request)
+        if isinstance(resolved, Response):
+            return resolved
+        view, inline_cls, parent_obj = resolved
+        if inline_cls.order_field is None:
+            return _error("reordering is not enabled for this inline", 404)
+        if not inline_cls.can_edit:
+            return _error("editing is not allowed", 403)
+        pks = await _json_pks(request)
+        if isinstance(pks, Response):
+            return pks
+        updated = await inline_cls.reorder_children(view.session_maker, parent_obj, pks)
+        return JSONResponse({"ok": True, "updated": updated})
+
+    # Legacy sqladmin (< 0.31): no edit_context hook -> wrap the edit route ----
+
+    def _wrap_edit(route: Route) -> Route:
+        original = route.endpoint
+
+        async def _prepare(request: Request) -> None:
+            view = admin._find_model_view(request.path_params["identity"])
+            if not getattr(view, "inlines", None):
+                return
+            if not await _maybe_await(view.is_accessible(request)):
+                return  # the original handler raises 403
+            parent_obj = await view.get_object_for_edit(request)
+            if parent_obj is not None:
+                setattr(
+                    request.state,
+                    STATE_ATTR,
+                    await view._build_inline_contexts(request, parent_obj),
                 )
-            return JSONResponse({"ok": True})
-        except Exception as exc:
-            logger.exception(exc)
-            return JSONResponse({"error": str(exc)}, status_code=500)
 
-    existing_routes2 = list(admin.admin.router.routes)
-    existing_routes2.append(
-        _Route(
-            "/{identity}/inline/{inline_identity}/reorder",
-            endpoint=inline_reorder,
-            methods=["POST"],
+        guarded_prepare = _protect(_prepare)
+
+        async def edit_with_inlines(request: Request) -> Response:
+            early = await guarded_prepare(request)
+            if isinstance(early, Response):  # login redirect
+                return early
+            return await original(request)  # type: ignore[no-any-return]
+
+        return Route(
+            route.path,
+            endpoint=edit_with_inlines,
+            name=route.name,
+            methods=route.methods,
         )
-    )
-    admin.admin.router.routes = existing_routes2
 
-    new_routes = [
-        Route(
-            "/{identity}/inline/{inline_identity}/{parent_pk:path}/list",
-            endpoint=inline_list,
-            name="inline:list",
-            methods=["GET"],
+    # Registration --------------------------------------------------------------
+
+    routes = list(admin.admin.router.routes)
+    if not HAS_CONTEXT_HOOKS:
+        routes = [
+            _wrap_edit(r) if isinstance(r, Route) and r.name == "edit" else r
+            for r in routes
+        ]
+
+    base = "/{identity}/inline/{inline_identity}/{parent_pk:path}"
+    inline_routes = [
+        Mount(
+            STATICS_PATH,
+            app=StaticFiles(directory=str(STATICS_DIR)),
+            name=STATICS_ROUTE_NAME,
         ),
         Route(
-            "/{identity}/inline/{inline_identity}/{parent_pk:path}/form",
-            endpoint=inline_form,
-            name="inline:form",
-            methods=["GET"],
+            f"{base}/list", _protect(inline_list), name="inline:list", methods=["GET"]
         ),
         Route(
-            "/{identity}/inline/{inline_identity}/{parent_pk:path}/save",
-            endpoint=inline_save,
-            name="inline:save",
-            methods=["POST"],
+            f"{base}/form", _protect(inline_form), name="inline:form", methods=["GET"]
         ),
         Route(
-            "/{identity}/inline/{inline_identity}/{parent_pk:path}/delete",
-            endpoint=inline_delete,
+            f"{base}/save", _protect(inline_save), name="inline:save", methods=["POST"]
+        ),
+        Route(
+            f"{base}/delete",
+            _protect(inline_delete),
             name="inline:delete",
             methods=["DELETE"],
         ),
+        Route(
+            f"{base}/reorder",
+            _protect(inline_reorder),
+            name="inline:reorder",
+            methods=["POST"],
+        ),
     ]
-    admin.admin.router.routes = list(admin.admin.router.routes) + new_routes
+    # Put our routes first so generic "/{identity}/..." routes never shadow them.
+    admin.admin.router.routes = inline_routes + routes
+    setattr(admin, _INSTALLED_ATTR, True)
 
 
+#: Backward-compatible alias.
 register_inline_globals = setup_inline_routes
-
-
-# ---------------------------------------------------------------------------
-# Helper Functions
-# ---------------------------------------------------------------------------
-
-
-def _prefix(inline_cls: type[InlineModelAdmin]) -> str:
-    """Generate a safe HTML ID prefix for an inline section."""
-    import re
-
-    return re.sub(r"[^a-z0-9]+", "_", inline_cls.model.__name__.lower()).strip("_")
-
-
-def _encode_parent_pk(obj: Any) -> str:
-    """Encode parent primary key(s) into a comma-separated string."""
-    from sqladmin.helpers import get_primary_keys
-
-    pks = get_primary_keys(type(obj))
-    return ",".join(str(getattr(obj, pk.key)) for pk in pks)
-
-
-async def _get_parent_by_pk(view: Any, pk_str: str) -> Any | None:
-    """Fetch parent model instance by its encoded primary key."""
-    from sqladmin.helpers import is_async_session_maker
-
-    pk_cols = list(view.pk_columns)
-    parts = str(pk_str).split(",")
-    pk_vals = {col.key: parts[i] for i, col in enumerate(pk_cols) if i < len(parts)}
-
-    async def _fetch(session: Any) -> Any | None:
-        conditions = [getattr(view.model, k) == v for k, v in pk_vals.items()]
-        result = await session.execute(sa_select(view.model).where(*conditions))
-        return result.scalars().first()
-
-    if is_async_session_maker(view.session_maker):
-        async with view.session_maker() as session:
-            return await _fetch(session)
-    return None

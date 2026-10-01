@@ -1,6 +1,6 @@
 [project]
 name = "sqladmin-inline"
-version = "0.2.0"
+version = "0.2.1"
 description = "Django-style inline editing for sqladmin. Works offline: no CDN, all assets bundled."
 readme = "README.md"
 requires-python = ">=3.10"

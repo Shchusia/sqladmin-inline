@@ -4,7 +4,7 @@
 
 [![Coverage Status](https://img.shields.io/badge/%20Python%20Versions-%3E%3D3.10-informational)](https://github.com/Shchusia/sqladmin_inline)
 [![Coverage Status](https://coveralls.io/repos/github/Shchusia/sqladmin-inline/badge.svg)](https://coveralls.io/github/Shchusia/sqladmin-inline)
-[![Coverage Status](https://img.shields.io/badge/Version-0.2.0-informational)](https://pypi.org/project/sqladmin_inline/)
+[![Coverage Status](https://img.shields.io/badge/Version-0.2.1-informational)](https://pypi.org/project/sqladmin_inline/)
 
 **Works fully offline.** Every asset is either bundled with this package (SortableJS, the
 inline JS/CSS) or already shipped by sqladmin (Bootstrap/Tabler, Font Awesome, jQuery,

@@ -12,20 +12,21 @@ Demonstrates all inline features:
 Run:
     rm -f demo.db && python demo.py
     → http://localhost:8000/admin
+
+Works offline: every asset (JS/CSS/fonts) is served by the app itself.
 """
 
-import pathlib
 from contextlib import asynccontextmanager
-from typing import List, Optional
+import pathlib
+from typing import Optional
 
 from fastapi import FastAPI
+from sqladmin import Admin, ModelView
 from sqlalchemy import ForeignKey, Integer, String, Text
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
-from sqladmin import Admin, ModelView
 from sqladmin_inline import InlineModelAdmin, ModelViewWithInlines, setup_inline_routes
-
 
 # ---------------------------------------------------------------------------
 # Models
@@ -40,7 +41,7 @@ class User(Base):
     __tablename__ = "users"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(100))
-    comments: Mapped[List["Comment"]] = relationship("Comment", back_populates="author")
+    comments: Mapped[list["Comment"]] = relationship("Comment", back_populates="author")
 
     def __str__(self) -> str:
         return self.name
@@ -50,8 +51,8 @@ class Author(Base):
     __tablename__ = "authors"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(200))
-    bio: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    posts: Mapped[List["Post"]] = relationship("Post", back_populates="author")
+    bio: Mapped[str | None] = mapped_column(Text, nullable=True)
+    posts: Mapped[list["Post"]] = relationship("Post", back_populates="author")
 
     def __str__(self) -> str:
         return self.name
@@ -61,16 +62,16 @@ class Post(Base):
     __tablename__ = "posts"
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     title: Mapped[str] = mapped_column(String(300))
-    body: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    author_id: Mapped[Optional[int]] = mapped_column(
+    body: Mapped[str | None] = mapped_column(Text, nullable=True)
+    author_id: Mapped[int | None] = mapped_column(
         ForeignKey("authors.id"), nullable=True
     )
 
     author: Mapped[Optional["Author"]] = relationship("Author", back_populates="posts")
-    tags: Mapped[List["Tag"]] = relationship(
+    tags: Mapped[list["Tag"]] = relationship(
         "Tag", back_populates="post", cascade="all, delete-orphan"
     )
-    comments: Mapped[List["Comment"]] = relationship(
+    comments: Mapped[list["Comment"]] = relationship(
         "Comment", back_populates="post", cascade="all, delete-orphan"
     )
 
@@ -101,9 +102,7 @@ class Comment(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     body: Mapped[str] = mapped_column(Text)
     post_id: Mapped[int] = mapped_column(ForeignKey("posts.id"))
-    author_id: Mapped[Optional[int]] = mapped_column(
-        ForeignKey("users.id"), nullable=True
-    )
+    author_id: Mapped[int | None] = mapped_column(ForeignKey("users.id"), nullable=True)
 
     post: Mapped["Post"] = relationship("Post", back_populates="comments")
     author: Mapped[Optional["User"]] = relationship(
@@ -129,23 +128,24 @@ class TagInline(InlineModelAdmin, model=Tag):
       position updates automatically via /reorder
     - column_default_sort not needed: order_field takes priority
     - can_create = True → Add button enabled
+    - position is excluded from the form → new tags are appended at the end
     """
 
     inline_label = "Tags"
-    icon = "fas fa-tag"
-    # layout        = "sidebar"
+    icon = "fa-solid fa-tag"
+    layout = "sidebar"
 
     # Drag-and-drop: integer order field
     order_field = "position"
 
-    column_list = [Tag.name]  # position is shown as # automatically
+    column_list = [Tag.name]
     column_labels = {Tag.name: "Tag name"}
     column_searchable_list = [Tag.name]
     page_size = 5
     can_delete = True
     can_create = True
     can_edit = True
-    form_excluded_columns = ["post"]
+    form_excluded_columns = ["post", "position"]
 
 
 class CommentInline(InlineModelAdmin, model=Comment):
@@ -161,7 +161,7 @@ class CommentInline(InlineModelAdmin, model=Comment):
     """
 
     inline_label = "Comments"
-    icon = "fa fa-comments"
+    icon = "fa-solid fa-comments"
     layout = "center"
 
     # Sorting: new ones on top
@@ -173,7 +173,7 @@ class CommentInline(InlineModelAdmin, model=Comment):
     page_size = 3  # intentionally small to demonstrate Load More
     can_delete = True
     can_create = True
-    can_edit = True
+    can_edit = False
     form_columns = [Comment.body, Comment.author]
 
 
@@ -184,7 +184,7 @@ class UserCommentInline(InlineModelAdmin, model=Comment):
     """
 
     inline_label = "My Comments"
-    icon = "fas fa-comments"
+    icon = "fa-solid fa-comment-dots"
     layout = "center"
     column_default_sort = ("id", False)  # old ones on top
 
@@ -358,4 +358,4 @@ if __name__ == "__main__":
     print("    • UserCommentInline: page_size=2 → Load More active")
     print("=" * 60)
     print()
-    uvicorn.run(app, host="0.0.0.0", port=8001, reload=False)
+    uvicorn.run(app, host="0.0.0.0", port=8000, reload=False)

@@ -1,0 +1,22 @@
+/* sqladmin-inline — bundled styles (no external fonts or images). */
+.inline-section .inline-header {
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: .5rem;
+}
+.inline-section .inline-collapse-icon {
+  font-size: .75rem;
+  transition: transform .2s ease;
+}
+.inline-section .inline-header[aria-expanded="false"] .inline-collapse-icon {
+  transform: rotate(-90deg);
+}
+.inline-section .inline-no-toggle { cursor: default; }
+.inline-section .inline-search { width: 14rem; max-width: 100%; }
+.inline-section .inline-drag-handle { cursor: grab; width: 2rem; }
+.inline-section .inline-drag-handle:active { cursor: grabbing; }
+.inline-section tr.sortable-chosen { opacity: .85; }
+#inline-modal .select2-container { width: 100% !important; }

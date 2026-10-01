@@ -1,633 +1,478 @@
-"""
-tests/test_views_http.py
-~~~~~~~~~~~~~~~~~~~~~~~~~
-
-HTTP-level integration tests for inline CRUD routes registered by
-setup_inline_routes():
-
-  GET  /{identity}/inline/{inline_identity}/{parent_pk}/list
-  GET  /{identity}/inline/{inline_identity}/{parent_pk}/form
-  POST /{identity}/inline/{inline_identity}/{parent_pk}/save
-  DELETE /{identity}/inline/{inline_identity}/{parent_pk}/delete
-
-Also covers:
-  - patched_edit GET / POST
-  - 404 / 403 edge-cases
-  - ModelViewWithInlines.get_form_columns()
-  - layout context splitting (sidebar vs center)
-  - icon passed to template context
-"""
+"""HTTP endpoints and the edit/create pages (async + sync session makers)."""
 
 from __future__ import annotations
 
-import json
+import re
+
+import httpx
 import pytest
 
-pytestmark = pytest.mark.asyncio
-import pytest_asyncio
-
-from sqlalchemy import select as sa_select
+from sqladmin_inline import InlineModelAdmin, ModelViewWithInlines
 
 from .conftest import (
+    DB,
+    AppFactory,
     Comment,
-    CommentInline,
     Post,
     Tag,
     TagInline,
-    User,
+    UserAdmin,
+    client_for,
+    inline_url,
 )
 
 
-async def _get_fresh(session_maker, model, pk):
-    """Fetch a fresh model instance in its own session (expunged for cross-session use)."""
-    async with session_maker() as s:
-        result = await s.execute(sa_select(model).where(model.id == pk))
-        obj = result.scalars().first()
-        s.expunge(obj)
-        return obj
+async def delete(
+    client: httpx.AsyncClient, url: str, **kwargs: object
+) -> httpx.Response:
+    return await client.request("DELETE", url, **kwargs)  # type: ignore[arg-type]
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
-
-TAG_INLINE_ID = TagInline.identity  # "tag_inline"
-COMMENT_INLINE_ID = CommentInline.identity  # "comment_inline"
-
-
-def list_url(post_id, inline_id=TAG_INLINE_ID):
-    return f"/admin/post/inline/{inline_id}/{post_id}/list"
-
-
-def form_url(post_id, inline_id=TAG_INLINE_ID, pk=None):
-    url = f"/admin/post/inline/{inline_id}/{post_id}/form"
-    if pk:
-        url += f"?pk={pk}"
-    return url
-
-
-def save_url(post_id, inline_id=TAG_INLINE_ID):
-    return f"/admin/post/inline/{inline_id}/{post_id}/save"
-
-
-def delete_url(post_id, inline_id=TAG_INLINE_ID):
-    return f"/admin/post/inline/{inline_id}/{post_id}/delete"
-
-
-# ===========================================================================
-# GET /list
-# ===========================================================================
-
-
-class TestInlineList:
-    def test_list_empty_returns_200(self, client, post):
-        r = client.get(list_url(post.id))
+class TestList:
+    async def test_empty(self, db: DB, client: httpx.AsyncClient) -> None:
+        r = await client.get(inline_url(db.post().id))
         assert r.status_code == 200
-        assert "No Tags" in r.text
+        assert "No Tags yet" in r.text and 'id="inline-tag_inline"' in r.text
 
-    def test_list_shows_children(self, client, post_with_tags):
-        r = client.get(list_url(post_with_tags.id))
+    async def test_rows_pagination_search(
+        self, db: DB, client: httpx.AsyncClient
+    ) -> None:
+        post = db.post()
+        db.tags(post, 5)
+        r = await client.get(inline_url(post.id))
+        assert "tag1" in r.text and "tag4" not in r.text
+        assert "Showing 1–3 of 5" in r.text and "(2 more)" in r.text
+        r2 = await client.get(inline_url(post.id) + "?page=2")
+        assert "tag4" in r2.text and "tag1" not in r2.text
+        r3 = await client.get(inline_url(post.id) + "?search=tag5")
+        assert "tag5" in r3.text and "tag1" not in r3.text
+        r4 = await client.get(inline_url(post.id) + "?search=zzz")
+        assert "No results for" in r4.text
+
+    async def test_garbage_page_param(self, db: DB, client: httpx.AsyncClient) -> None:
+        post = db.post()
+        for value in ("abc", "-3", "0", "999"):
+            assert (
+                await client.get(inline_url(post.id) + f"?page={value}")
+            ).status_code == 200
+
+    async def test_search_is_escaped_in_html(
+        self, db: DB, client: httpx.AsyncClient
+    ) -> None:
+        r = await client.get(inline_url(db.post().id) + "?search=<script>x</script>")
+        assert "<script>x</script>" not in r.text
+        assert "&lt;script&gt;" in r.text
+
+    async def test_author_column(self, db: DB, client: httpx.AsyncClient) -> None:
+        post, user = db.post(), db.user("Bob")
+        db.comments(post, 1, author=user)
+        r = await client.get(inline_url(post.id, "comment_inline"))
+        assert r.status_code == 200 and "Bob" in r.text and "<th>Text</th>" in r.text
+
+    @pytest.mark.parametrize(
+        ("url", "status"),
+        [
+            ("/admin/post/inline/nope/{pk}/list", 404),
+            ("/admin/post/inline/tag_inline/999999/list", 404),
+            ("/admin/post/inline/tag_inline/abc/list", 404),
+            ("/admin/nope/inline/tag_inline/{pk}/list", 404),
+            ("/admin/user/inline/tag_inline/{pk}/list", 404),  # plain ModelView
+        ],
+    )
+    async def test_not_found(
+        self, db: DB, client: httpx.AsyncClient, url: str, status: int
+    ) -> None:
+        r = await client.get(url.format(pk=db.post().id))
+        assert r.status_code == status
+        assert "error" in r.json()
+
+
+class TestForm:
+    async def test_add_form(self, db: DB, client: httpx.AsyncClient) -> None:
+        post = db.post("Parent")
+        r = await client.get(inline_url(post.id, "comment_inline", "form"))
         assert r.status_code == 200
-        # Tag names are in the HTML
-        assert "tag1" in r.text
+        assert 'name="body"' in r.text and 'name="_child_pk" value=""' in r.text
+        assert (
+            f'data-save-url="/admin/post/inline/comment_inline/{post.id}/save"'
+            in r.text
+        )
+        # the parent relationship is pre-selected
+        assert re.search(rf'<option selected value="{post.id}">Parent</option>', r.text)
 
-    def test_list_search_filters(self, client, post_with_tags):
-        r = client.get(list_url(post_with_tags.id) + "?search=tag1")
+    async def test_edit_form_prefilled(self, db: DB, client: httpx.AsyncClient) -> None:
+        post, user = db.post(), db.user("Bob")
+        (c,) = db.comments(post, 1, author=user)
+        r = await client.get(
+            inline_url(post.id, "comment_inline", "form") + f"?pk={c.id}"
+        )
         assert r.status_code == 200
-        assert "tag1" in r.text
-        assert "tag2" not in r.text
+        assert "Comment 1" in r.text
+        assert f'<option selected value="{user.id}">Bob</option>' in r.text
 
-    def test_list_search_no_results(self, client, post_with_tags):
-        r = client.get(list_url(post_with_tags.id) + "?search=zzznomatch")
-        assert r.status_code == 200
-
-    def test_list_pagination_page2(self, client, post_with_tags):
-        """Page 2 should have 2 tags (5 total, page_size=3)."""
-        r = client.get(list_url(post_with_tags.id) + "?page=2")
-        assert r.status_code == 200
-
-    def test_list_404_unknown_inline(self, client, post):
-        r = client.get(f"/admin/post/inline/nonexistent_inline/{post.id}/list")
+    async def test_edit_form_of_other_parent(
+        self, db: DB, client: httpx.AsyncClient
+    ) -> None:
+        a, b = db.post("a"), db.post("b")
+        (t,) = db.tags(a, 1)
+        r = await client.get(inline_url(b.id, action="form") + f"?pk={t.id}")
         assert r.status_code == 404
 
-    def test_list_404_unknown_parent(self, client):
-        r = client.get(list_url(999999))
-        assert r.status_code == 404
+    async def test_permissions(self, db: DB, make_app: AppFactory) -> None:
+        class ReadOnly(InlineModelAdmin, model=Tag):
+            can_create = can_edit = can_delete = False
+            order_field = "position"
 
-    def test_list_comments_eager_loads_author(self, client, post_with_comments):
-        """Comment list with FK relationship must not raise DetachedInstanceError."""
-        r = client.get(list_url(post_with_comments.id, inline_id=COMMENT_INLINE_ID))
-        assert r.status_code == 200
+        class Admin_(ModelViewWithInlines, model=Post):
+            inlines = [ReadOnly]
+
+        app, _ = make_app(Admin_)
+        post = db.post()
+        (t,) = db.tags(post, 1)
+        async with client_for(app) as c:
+            assert (await c.get(inline_url(post.id, action="form"))).status_code == 403
+            assert (
+                await c.get(inline_url(post.id, action="form") + f"?pk={t.id}")
+            ).status_code == 403
+            assert (
+                await c.post(inline_url(post.id, action="save"), data={"name": "x"})
+            ).status_code == 403
+            r = await c.post(
+                inline_url(post.id, action="save"),
+                data={"name": "x", "_child_pk": t.id},
+            )
+            assert r.status_code == 403
+            assert (
+                await delete(
+                    c, inline_url(post.id, action="delete"), json={"pks": [t.id]}
+                )
+            ).status_code == 403
+            assert (
+                await c.post(
+                    inline_url(post.id, action="reorder"), json={"pks": [t.id]}
+                )
+            ).status_code == 403
+            listing = await c.get(inline_url(post.id))
+            assert "inline-add-btn" not in listing.text
+            assert "inline-edit-btn" not in listing.text
+            assert "inline-select-box" not in listing.text
+            assert "data-reorder-url" not in listing.text
+        assert len(db.all(Tag)) == 1
 
 
-# ===========================================================================
-# GET /form
-# ===========================================================================
-
-
-class TestInlineForm:
-    def test_form_add_returns_200(self, client, post):
-        r = client.get(form_url(post.id))
-        assert r.status_code == 200
-        assert "form" in r.text.lower()
-
-    def test_form_add_includes_name_field(self, client, post):
-        r = client.get(form_url(post.id))
-        assert 'name="name"' in r.text
-
-    def test_form_edit_returns_200(self, client, post, session_maker):
-        """Edit form should pre-populate with existing values."""
-        import asyncio
-
-        fresh_post = asyncio.get_event_loop().run_until_complete(
-            _get_fresh(session_maker, Post, post.id)
+class TestSave:
+    async def test_create(self, db: DB, client: httpx.AsyncClient) -> None:
+        post = db.post()
+        r = await client.post(
+            inline_url(post.id, action="save"),
+            data={"name": "via-http", "post": str(post.id)},
         )
-        tag = asyncio.get_event_loop().run_until_complete(
-            TagInline.create_child(session_maker, fresh_post, {"name": "edit-me"})
+        assert r.status_code == 200 and r.json()["ok"] is True
+        (tag,) = db.all(Tag)
+        assert (tag.name, tag.post_id, r.json()["pk"]) == (
+            "via-http",
+            post.id,
+            str(tag.id),
         )
-        r = client.get(form_url(post.id, pk=tag.id))
-        assert r.status_code == 200
-        assert "edit-me" in r.text
 
-    def test_form_404_unknown_inline(self, client, post):
-        r = client.get(f"/admin/post/inline/bogus/{post.id}/form")
-        assert r.status_code == 404
-
-    def test_form_comment_has_author_select(self, client, post, user):
-        """Comment add-form must include FK-select for Author."""
-        r = client.get(form_url(post.id, inline_id=COMMENT_INLINE_ID))
-        assert r.status_code == 200
-        # The author field or a select should appear
-        assert "author" in r.text.lower() or "select" in r.text.lower()
-
-
-# ===========================================================================
-# POST /save
-# ===========================================================================
-
-
-class TestInlineSave:
-    def test_save_creates_new_tag(self, client, post, session_maker):
-        r = client.post(
-            save_url(post.id),
-            data={"name": "created-via-http", "_child_pk": "", "post": str(post.id)},
+    async def test_create_comment_with_author(
+        self, db: DB, client: httpx.AsyncClient
+    ) -> None:
+        post, user = db.post(), db.user()
+        r = await client.post(
+            inline_url(post.id, "comment_inline", "save"),
+            data={"body": "hello", "post": str(post.id), "author": str(user.id)},
         )
-        assert r.status_code == 200
-        assert r.json() == {"ok": True}
+        assert r.status_code == 200, r.text
+        (c,) = db.all(Comment)
+        assert (c.author_id, c.post_id) == (user.id, post.id)
 
-        import asyncio
-
-        fresh_post = asyncio.get_event_loop().run_until_complete(
-            _get_fresh(session_maker, Post, post.id)
-        )
-        page = asyncio.get_event_loop().run_until_complete(
-            TagInline.get_page(session_maker, fresh_post)
-        )
-        names = [t.name for t in page.rows]
-        assert "created-via-http" in names
-
-    def test_save_updates_existing_tag(self, client, post, session_maker):
-        import asyncio
-
-        fresh_post = asyncio.get_event_loop().run_until_complete(
-            _get_fresh(session_maker, Post, post.id)
-        )
-        tag = asyncio.get_event_loop().run_until_complete(
-            TagInline.create_child(session_maker, fresh_post, {"name": "before-update"})
-        )
-        r = client.post(
-            save_url(post.id),
-            data={
-                "name": "after-update",
-                "_child_pk": str(tag.id),
-                "post": str(post.id),
-            },
+    async def test_update(self, db: DB, client: httpx.AsyncClient) -> None:
+        post = db.post()
+        (t,) = db.tags(post, 1)
+        r = await client.post(
+            inline_url(post.id, action="save"),
+            data={"name": "renamed", "_child_pk": str(t.id), "post": str(post.id)},
         )
         assert r.status_code == 200
-        assert r.json()["ok"] is True
+        assert db.get(Tag, t.id).name == "renamed"
 
-        updated = asyncio.get_event_loop().run_until_complete(
-            TagInline.get_by_pk(session_maker, str(tag.id))
-        )
-        assert updated.name == "after-update"
-
-    def test_save_404_unknown_inline(self, client, post):
-        r = client.post(
-            f"/admin/post/inline/bogus/{post.id}/save",
-            data={"name": "x"},
+    async def test_update_child_of_other_parent(
+        self, db: DB, client: httpx.AsyncClient
+    ) -> None:
+        a, b = db.post("a"), db.post("b")
+        (t,) = db.tags(a, 1)
+        r = await client.post(
+            inline_url(b.id, action="save"),
+            data={"name": "hacked", "_child_pk": str(t.id), "post": str(b.id)},
         )
         assert r.status_code == 404
+        assert db.get(Tag, t.id).name == "tag1"
 
-    def test_save_404_unknown_parent(self, client):
-        r = client.post(save_url(999999), data={"name": "x", "_child_pk": ""})
-        assert r.status_code == 404
-
-    def test_save_validation_error_returns_422(self, client, post):
-        """Submitting without required FK field returns 422 with form HTML."""
-        # Omit required 'post' FK field — WTForms QuerySelectField will fail validation
-        r = client.post(
-            save_url(post.id),
-            data={"_child_pk": ""},  # no name, no post FK
+    async def test_validation_error_returns_form(
+        self, db: DB, client: httpx.AsyncClient
+    ) -> None:
+        post = db.post()
+        r = await client.post(
+            inline_url(post.id, action="save"), data={"_child_pk": ""}
         )
-        assert r.status_code in (200, 422)
-        # Must not be a 500
-        assert r.status_code != 500
+        assert r.status_code == 422
+        assert 'id="inline-modal-form"' in r.text and "is-invalid" in r.text
+        assert db.all(Tag) == []
+
+    async def test_database_error(
+        self, db: DB, make_app: AppFactory, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async def boom(*args: object, **kwargs: object) -> None:
+            raise RuntimeError("constraint failed")
+
+        monkeypatch.setattr(TagInline, "create_child", boom)
+        app, _ = make_app()
+        post = db.post()
+        async with client_for(app) as c:
+            r = await c.post(
+                inline_url(post.id, action="save"),
+                data={"name": "x", "post": str(post.id)},
+            )
+        assert r.status_code == 400 and r.json() == {"error": "constraint failed"}
 
 
-# ===========================================================================
-# DELETE /delete
-# ===========================================================================
-
-
-class TestInlineDelete:
-    def test_delete_single(self, client, post, session_maker):
-        import asyncio
-
-        fresh_post = asyncio.get_event_loop().run_until_complete(
-            _get_fresh(session_maker, Post, post.id)
+class TestDelete:
+    async def test_bulk(self, db: DB, client: httpx.AsyncClient) -> None:
+        post = db.post()
+        tags = db.tags(post, 3)
+        r = await delete(
+            client,
+            inline_url(post.id, action="delete"),
+            json={"pks": [tags[0].id, str(tags[1].id), 999]},
         )
-        tag = asyncio.get_event_loop().run_until_complete(
-            TagInline.create_child(session_maker, fresh_post, {"name": "to-be-deleted"})
+        assert r.json() == {"deleted": 2}
+        assert [t.name for t in db.all(Tag)] == ["tag3"]
+
+    async def test_other_parent_is_untouched(
+        self, db: DB, client: httpx.AsyncClient
+    ) -> None:
+        a, b = db.post("a"), db.post("b")
+        (t,) = db.tags(a, 1)
+        r = await delete(
+            client, inline_url(b.id, action="delete"), json={"pks": [t.id]}
         )
-        r = client.request(
-            "DELETE",
-            delete_url(post.id),
-            content=json.dumps({"pks": [tag.id]}),
-            headers={"Content-Type": "application/json"},
+        assert r.json() == {"deleted": 0}
+        assert len(db.all(Tag)) == 1
+
+    @pytest.mark.parametrize("body", [b"not json", b'{"pks": 5}', b"[1, 2]"])
+    async def test_bad_body(
+        self, db: DB, client: httpx.AsyncClient, body: bytes
+    ) -> None:
+        r = await delete(
+            client,
+            inline_url(db.post().id, action="delete"),
+            content=body,
+            headers={"content-type": "application/json"},
         )
+        assert r.status_code == 400
+
+
+class TestReorder:
+    async def test_reorder(self, db: DB, client: httpx.AsyncClient) -> None:
+        post = db.post()
+        t1, t2, t3 = db.tags(post, 3)
+        r = await client.post(
+            inline_url(post.id, action="reorder"), json={"pks": [t3.id, t1.id, t2.id]}
+        )
+        assert r.json() == {"ok": True, "updated": 3}
+        listing = await client.get(inline_url(post.id))
+        assert (
+            listing.text.index("tag3")
+            < listing.text.index("tag1")
+            < listing.text.index("tag2")
+        )
+
+    async def test_not_enabled_and_bad_body(
+        self, db: DB, client: httpx.AsyncClient
+    ) -> None:
+        post = db.post()
+        assert (
+            await client.post(
+                inline_url(post.id, "comment_inline", "reorder"), json={"pks": []}
+            )
+        ).status_code == 404
+        assert (
+            await client.post(inline_url(post.id, action="reorder"), content=b"{")
+        ).status_code == 400
+
+
+class TestEditPage:
+    async def test_get(self, db: DB, client: httpx.AsyncClient) -> None:
+        post = db.post("Hello")
+        db.tags(post, 2)
+        r = await client.get(f"/admin/post/edit/{post.id}")
         assert r.status_code == 200
-        assert r.json()["deleted"] == 1
-
-    def test_delete_multiple(self, client, post_with_tags, session_maker):
-        import asyncio
-
-        page = asyncio.get_event_loop().run_until_complete(
-            TagInline.get_page(session_maker, post_with_tags)
-        )
-        pks = [t.id for t in page.rows[:2]]
-
-        r = client.request(
-            "DELETE",
-            delete_url(post_with_tags.id),
-            content=json.dumps({"pks": pks}),
-            headers={"Content-Type": "application/json"},
-        )
-        assert r.status_code == 200
-        assert r.json()["deleted"] == 2
-
-    def test_delete_nonexistent_pk(self, client, post):
-        r = client.request(
-            "DELETE",
-            delete_url(post.id),
-            content=json.dumps({"pks": [999999]}),
-            headers={"Content-Type": "application/json"},
-        )
-        assert r.status_code == 200
-        assert r.json()["deleted"] == 0
-
-    def test_delete_empty_list(self, client, post):
-        r = client.request(
-            "DELETE",
-            delete_url(post.id),
-            content=json.dumps({"pks": []}),
-            headers={"Content-Type": "application/json"},
-        )
-        assert r.status_code == 200
-        assert r.json()["deleted"] == 0
-
-    def test_delete_404_unknown_inline(self, client, post):
-        r = client.request(
-            "DELETE",
-            f"/admin/post/inline/bogus/{post.id}/delete",
-            content=json.dumps({"pks": [1]}),
-            headers={"Content-Type": "application/json"},
-        )
-        assert r.status_code == 404
-
-
-# ===========================================================================
-# patched_edit (GET)
-# ===========================================================================
-
-
-class TestPatchedEditGet:
-    def test_edit_page_returns_200(self, client, post):
-        r = client.get(f"/admin/post/edit/{post.id}")
-        assert r.status_code == 200
-
-    def test_edit_page_contains_inline_sections(self, client, post):
-        r = client.get(f"/admin/post/edit/{post.id}")
-        assert r.status_code == 200
-        # Both inline labels must appear on the page
-        assert "Tags" in r.text
-        assert "Comments" in r.text
-
-    def test_edit_page_contains_icons(self, client, post):
-        r = client.get(f"/admin/post/edit/{post.id}")
-        assert "fa-tag" in r.text
-        assert "fa-comments" in r.text
-
-    def test_edit_page_sidebar_layout_columns(self, client, post):
-        """TagInline is sidebar → col-lg-4 column should be present."""
-        r = client.get(f"/admin/post/edit/{post.id}")
-        assert "col-lg-4" in r.text
-        assert "col-lg-8" in r.text
-
-    def test_edit_page_save_button_present(self, client, post):
-        r = client.get(f"/admin/post/edit/{post.id}")
-        assert "Save" in r.text
-
-    def test_edit_page_with_children(self, client, post_with_tags):
-        r = client.get(f"/admin/post/edit/{post_with_tags.id}")
-        assert r.status_code == 200
-        assert "tag1" in r.text
-
-    def test_edit_page_404_unknown_post(self, client):
-        r = client.get("/admin/post/edit/999999")
-        assert r.status_code in (404, 500)  # sqladmin may 500 on missing obj
-
-
-# ===========================================================================
-# patched_edit (POST)
-# ===========================================================================
-
-
-class TestPatchedEditPost:
-    def test_edit_post_saves_title(self, client, post, session_maker):
-        r = client.post(
-            f"/admin/post/edit/{post.id}",
-            data={"title": "Updated Title", "save": "Save"},
-            follow_redirects=False,
-        )
-        # Successful save redirects
-        assert r.status_code in (200, 302, 303)
-
-    def test_edit_post_redirects_on_success(self, client, post):
-        r = client.post(
-            f"/admin/post/edit/{post.id}",
-            data={"title": "New Title", "save": "Save"},
-            follow_redirects=False,
-        )
-        assert r.status_code in (302, 303)
-
-
-# ===========================================================================
-# ModelViewWithInlines.get_form_columns
-# ===========================================================================
-
-
-class TestGetFormColumns:
-    def test_excludes_inline_relationships(self, app, engine, session_maker):
-        """ONETOMANY relationships managed by inlines must not appear in form."""
-        from sqladmin import Admin
-        from sqladmin_inline import setup_inline_routes
-        from .conftest import PostAdmin, UserAdmin
-
-        _app2 = __import__("fastapi").FastAPI()
-        admin2 = Admin(_app2, engine=engine, session_maker=session_maker)
-        setup_inline_routes(admin2)
-        admin2.add_view(UserAdmin)
-        admin2.add_view(PostAdmin)
-
-        view = admin2._find_model_view("post")
-        names = view._inline_relationship_names()
-        assert "tags" in names or "comments" in names
-
-    def test_inline_relationship_names_returns_onetomany_only(
-        self, app, engine, session_maker
-    ):
-        from sqladmin import Admin
-        from sqladmin_inline import setup_inline_routes
-        from .conftest import PostAdmin, UserAdmin
-
-        _app2 = __import__("fastapi").FastAPI()
-        admin2 = Admin(_app2, engine=engine, session_maker=session_maker)
-        setup_inline_routes(admin2)
-        admin2.add_view(UserAdmin)
-        admin2.add_view(PostAdmin)
-
-        view = admin2._find_model_view("post")
-        names = view._inline_relationship_names()
-        assert "tags" in names
-        assert "comments" in names
-
-    def test_get_form_columns_filters_inline_relations(
-        self, app, engine, session_maker
-    ):
-        from sqladmin import Admin
-        from sqladmin_inline import setup_inline_routes
-        from .conftest import PostAdmin, UserAdmin
-
-        _app2 = __import__("fastapi").FastAPI()
-        admin2 = Admin(_app2, engine=engine, session_maker=session_maker)
-        setup_inline_routes(admin2)
-        admin2.add_view(UserAdmin)
-        admin2.add_view(PostAdmin)
-
-        view = admin2._find_model_view("post")
-        base = view.get_form_columns()
-        assert "tags" not in base
-        assert "comments" not in base
-
-
-# ===========================================================================
-# setup_inline_routes: template loader injection
-# ===========================================================================
-
-
-class TestSetupInlineRoutes:
-    def test_templates_include_inline_templates(self, client, post):
-        """Inline templates must be resolvable (would 500 if not found)."""
-        r = client.get(form_url(post.id))
-        assert r.status_code == 200
-
-    def test_second_call_does_not_crash(self, engine, session_maker):
-        """Calling setup_inline_routes twice should not raise."""
-        from fastapi import FastAPI
-        from sqladmin import Admin
-        from sqladmin_inline import setup_inline_routes
-        from .conftest import PostAdmin, UserAdmin
-
-        _app = FastAPI()
-        admin = Admin(_app, engine=engine, session_maker=session_maker)
-        setup_inline_routes(admin)
-        # Second call should not crash (idempotent loaders)
-        setup_inline_routes(admin)
-
-
-# ===========================================================================
-# Context layout splitting (sidebar vs center)
-# ===========================================================================
-
-
-class TestLayoutContext:
-    def test_sidebar_inline_in_right_column(self, client, post):
-        """Tags (layout=sidebar) should appear inside col-lg-4."""
-        r = client.get(f"/admin/post/edit/{post.id}")
         html = r.text
-        # Find the col-lg-4 block and verify Tags is within it
-        assert "col-lg-4" in html
-        # The sidebar should contain tag-related content
-        sidebar_start = html.find("col-lg-4")
-        # Tags label should appear somewhere after the sidebar column opens
-        assert "Tags" in html[sidebar_start:]
-
-    def test_center_inline_in_left_column(self, client, post):
-        """Comments (layout=center) should appear inside col-lg-8."""
-        r = client.get(f"/admin/post/edit/{post.id}")
-        html = r.text
-        assert "col-lg-8" in html
-        left_start = html.find("col-lg-8")
-        assert "Comments" in html[left_start:]
-
-    def test_no_sidebar_uses_full_width(self, engine, session_maker):
-        """View with only center inlines should not render sidebar columns."""
-        from fastapi import FastAPI
-        from starlette.testclient import TestClient
-        from sqladmin import Admin
-        from sqladmin_inline import (
-            InlineModelAdmin,
-            ModelViewWithInlines,
-            setup_inline_routes,
+        for snippet in (
+            'id="inline-tag_inline"',
+            'id="inline-comment_inline"',
+            "fa-solid fa-tag",
+            "tag1",
+            'id="inline-modal"',
+            "js/sqladmin-inline.js",
+            "css/sqladmin-inline.css",
+        ):
+            assert snippet in html, snippet
+        # sidebar layout: comments (center) in the left column, tags in the right one
+        left, right = (
+            html.index("inline-main-column"),
+            html.index("inline-sidebar-column"),
         )
-        from .conftest import Tag, Post, Base
-        import asyncio
-
-        class OnlyCenterInline(InlineModelAdmin, model=Tag):
-            inline_label = "Tags Center"
-            layout = "center"
-
-        class PostOnlyCenterAdmin(ModelViewWithInlines, model=Post):
-            inlines = [OnlyCenterInline]
-
-        _app = FastAPI()
-        admin = Admin(_app, engine=engine, session_maker=session_maker)
-        setup_inline_routes(admin)
-        admin.add_view(PostOnlyCenterAdmin)
-
-        with TestClient(_app) as c:
-            # create a post
-            p = asyncio.get_event_loop().run_until_complete(_create_post(session_maker))
-            r = c.get(f"/admin/post/edit/{p.id}")
-            assert r.status_code == 200
-            # No sidebar columns
-            assert "col-lg-4" not in r.text
-            assert "col-lg-8" not in r.text
-
-
-async def _create_post(session_maker):
-    async with session_maker() as session:
-        p = Post(title="Layout Test Post")
-        session.add(p)
-        await session.commit()
-        await session.refresh(p)
-        return p
-
-
-# ===========================================================================
-# inline_form edit path: form_data population for relationships (lines 228-244)
-# ===========================================================================
-
-
-class TestInlineFormEditWithRelationship:
-    def test_form_edit_comment_with_author(
-        self, client, post_with_comments, session_maker
-    ):
-        """Edit form for Comment with loaded author should populate form data."""
-        import asyncio
-
-        fresh = asyncio.get_event_loop().run_until_complete(
-            _get_fresh(session_maker, Post, post_with_comments.id)
+        assert (
+            left
+            < html.index('id="inline-comment_inline"')
+            < right
+            < html.index('id="inline-tag_inline"')
         )
-        page = asyncio.get_event_loop().run_until_complete(
-            CommentInline.get_page(session_maker, fresh)
+        # the parent form is sqladmin's own, inlines are outside of it
+        assert html.index("</form>") < html.index('id="inline-comment_inline"')
+        # relationships edited inline are removed from the parent form
+        assert 'name="tags"' not in html and 'name="comments"' not in html
+
+    async def test_center_only(self, db: DB, make_app: AppFactory) -> None:
+        class Center(InlineModelAdmin, model=Tag):
+            identity = "center_tags"
+
+        class Admin_(ModelViewWithInlines, model=Post):
+            inlines = [Center]
+
+        app, _ = make_app(Admin_)
+        post = db.post()
+        async with client_for(app) as c:
+            html = (await c.get(f"/admin/post/edit/{post.id}")).text
+        assert 'id="inline-center_tags"' in html
+        assert "inline-sidebar-column" not in html
+
+    async def test_without_inlines(self, db: DB, make_app: AppFactory) -> None:
+        class Admin_(ModelViewWithInlines, model=Post):
+            pass
+
+        app, _ = make_app(Admin_)
+        post = db.post()
+        async with client_for(app) as c:
+            r = await c.get(f"/admin/post/edit/{post.id}")
+        assert r.status_code == 200 and "inline-section" not in r.text
+
+    async def test_page_query_params(self, db: DB, client: httpx.AsyncClient) -> None:
+        post = db.post()
+        db.tags(post, 5)
+        r = await client.get(
+            f"/admin/post/edit/{post.id}?_il_tag_inline_page=2&_il_tag_inline_search=tag"
         )
-        assert len(page.rows) > 0
-        comment_pk = page.rows[0].id
+        assert "tag4" in r.text and "tag1" not in r.text
 
-        r = client.get(
-            form_url(post_with_comments.id, inline_id=COMMENT_INLINE_ID, pk=comment_pk)
+    async def test_post_saves_and_redirects(
+        self, db: DB, client: httpx.AsyncClient
+    ) -> None:
+        post = db.post()
+        r = await client.post(
+            f"/admin/post/edit/{post.id}", data={"title": "Updated", "save": "Save"}
         )
-        assert r.status_code == 200
-        # The form should be rendered
-        assert "form" in r.text.lower()
+        assert r.status_code == 302
+        assert db.get(Post, post.id).title == "Updated"
 
-    def test_save_causes_server_error_on_bad_data(self, client, post):
-        """A truly broken save (DB constraint violation) returns 500 or validation error."""
-        # Send nonsense post FK value
-        r = client.post(
-            save_url(post.id),
-            data={"name": "x", "_child_pk": "", "post": "999999"},
+    async def test_post_invalid_rerenders_with_inlines(
+        self, db: DB, client: httpx.AsyncClient
+    ) -> None:
+        post = db.post()
+        r = await client.post(
+            f"/admin/post/edit/{post.id}", data={"title": "", "save": "Save"}
         )
-        # Must not crash the server with unhandled exception
-        assert r.status_code in (200, 422, 500)
+        assert r.status_code == 400
+        assert 'id="inline-tag_inline"' in r.text
+
+    async def test_missing_parent(self, client: httpx.AsyncClient) -> None:
+        assert (await client.get("/admin/post/edit/999999")).status_code == 404
 
 
-# ===========================================================================
-# parent_conditions via column (not relationship) fk_attr — line 410-412
-# ===========================================================================
+async def test_create_page_hint(client: httpx.AsyncClient) -> None:
+    r = await client.get("/admin/post/create")
+    assert r.status_code == 200
+    assert "Related items" in r.text and "Tags, Comments" in r.text
+    assert "js/sqladmin-inline.js" in r.text
 
 
-class TestParentConditionsColumnPath:
-    @pytest.mark.asyncio
-    async def test_explicit_column_fk_attr(self, session_maker, post):
-        """_parent_conditions with a column fk_attr (not relationship) path."""
-        from sqladmin_inline import InlineModelAdmin
-        from .conftest import Tag, Post
+async def test_setup_is_idempotent(db: DB, make_app: AppFactory) -> None:
+    from sqladmin_inline import setup_inline_routes
 
-        class ColFkInline(InlineModelAdmin, model=Tag):
-            fk_attr = "post_id"  # column, not relationship
-
-        conditions = ColFkInline._parent_conditions("post_id", post)
-        assert len(conditions) == 1
-
-        # Should still fetch correctly
-        page = await ColFkInline.get_page(session_maker, post)
-        assert page is not None
+    _, admin = make_app()
+    before = len(admin.admin.router.routes)
+    setup_inline_routes(admin)
+    assert len(admin.admin.router.routes) == before
 
 
-# ===========================================================================
-# inline_form: exception path when getattr raises (lines 245-252)
-# ===========================================================================
+async def test_build_inline_contexts(db: DB, admin_view: ModelViewWithInlines) -> None:
+    from .conftest import fake_request
+
+    post = db.post()
+    contexts = await admin_view._build_inline_contexts(fake_request(), post)
+    assert [c["identity"] for c in contexts] == ["tag_inline", "comment_inline"]
+    assert contexts[0]["base_url"] == f"/post/inline/tag_inline/{post.id}"
+    assert contexts[0]["sortable"] is True and contexts[1]["sortable"] is False
+    empty = await admin_view._build_inline_contexts(fake_request(), None)
+    assert all(c["pagination"].count == 0 and c["parent_pk"] == "" for c in empty)
+    assert admin_view.find_inline("nope") is None
+    assert admin_view._inline_relationship_names() == ["tags", "comments"]
+    assert UserAdmin  # imported for app setup
 
 
-class TestInlineFormRelationshipFallback:
-    def test_form_edit_with_fk_relationship_populates(
-        self, client, post_with_comments, session_maker
-    ):
-        """Edit form for Comment uses relationship data for FK fields."""
-        import asyncio
+async def test_legacy_edit_route_wrapper(
+    db: DB, make_app: AppFactory, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """sqladmin < 0.31 has no edit_context hook: the edit route is wrapped instead."""
+    from sqladmin.authentication import AuthenticationBackend
 
-        fresh = asyncio.get_event_loop().run_until_complete(
-            _get_fresh(session_maker, Post, post_with_comments.id)
+    import sqladmin_inline.views as views
+
+    async def no_hook(self: object, request: object) -> dict:
+        return {}
+
+    class Deny(AuthenticationBackend):
+        async def login(self, request: object) -> bool:
+            return False
+
+        async def logout(self, request: object) -> bool:
+            return True
+
+        async def authenticate(self, request: object) -> bool:
+            return False
+
+    monkeypatch.setattr(views, "HAS_CONTEXT_HOOKS", False)
+    monkeypatch.setattr(ModelViewWithInlines, "edit_context", no_hook)
+
+    class Hidden(ModelViewWithInlines, model=Post):
+        inlines = [TagInline]
+
+        def is_accessible(self, request: object) -> bool:
+            return False
+
+    class NoInlines(ModelViewWithInlines, model=Post):
+        pass
+
+    post = db.post()
+    db.tags(post, 2)
+
+    app, _ = make_app()
+    async with client_for(app) as c:
+        r = await c.get(f"/admin/post/edit/{post.id}")
+        assert (
+            r.status_code == 200
+            and 'id="inline-tag_inline"' in r.text
+            and "tag1" in r.text
         )
-        page = asyncio.get_event_loop().run_until_complete(
-            CommentInline.get_page(session_maker, fresh)
-        )
-        comment_pk = page.rows[0].id
-        r = client.get(
-            form_url(post_with_comments.id, inline_id=COMMENT_INLINE_ID, pk=comment_pk)
-        )
-        assert r.status_code == 200
-        # Both post and author should be pre-populated
-        assert "selected" in r.text or "value" in r.text
+        assert (await c.get("/admin/post/edit/999999")).status_code == 404
 
+    for view, status in ((Hidden, 403), (NoInlines, 200)):
+        app, _ = make_app(view)
+        async with client_for(app) as c:
+            assert (await c.get(f"/admin/post/edit/{post.id}")).status_code == status
 
-# ===========================================================================
-# inline_save: DB exception path (line 324-326)
-# ===========================================================================
-
-
-class TestInlineSaveExceptionPath:
-    def test_save_db_exception_returns_500(self, client, post):
-        """When DB raises during save, should return 500 with error JSON."""
-        # Send a post FK that doesn't exist to trigger DB error after validation
-        # WTForms QuerySelectField might pass validation with a raw int,
-        # but DB will fail on FK constraint
-        r = client.post(
-            save_url(post.id),
-            data={"name": "x", "_child_pk": "", "post": str(post.id)},
-        )
-        # Valid save should succeed
-        assert r.status_code in (200, 422, 500)
-        assert r.status_code != 400  # shouldn't be a generic bad request
+    app, _ = make_app(authentication_backend=Deny(secret_key="x"))
+    async with client_for(app) as c:
+        assert (await c.get(f"/admin/post/edit/{post.id}")).status_code == 302
